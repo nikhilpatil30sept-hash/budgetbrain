@@ -1,0 +1,23 @@
+# Environment files — the Gemini API key lives ONLY in server/.env
+.env
+.env.local
+*.env
+
+# Dependencies
+node_modules/
+
+# SQLite data folder
+server/data/
+
+# Local API-call logs
+server/logs/
+
+# Build output
+dist/
+client/dist/
+server/dist/
+*.tsbuildinfo
+
+# OS / editor noise
+.DS_Store
+*.log

@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-cream-100 font-sans text-ink-900 antialiased;
+}
+
+/* Lava-lamp blob drift — transform-only so it stays on the GPU. */
+@keyframes blob-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(5vw, 3vh) scale(1.08); }
+  66% { transform: translate(-3vw, 6vh) scale(0.95); }
+}
+@keyframes blob-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  40% { transform: translate(-6vw, -4vh) scale(1.1); }
+  75% { transform: translate(3vw, 3vh) scale(0.92); }
+}
+@keyframes blob-c {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(6vw, -5vh) scale(1.12); }
+}
+.blob-drift-a { animation: blob-a 26s ease-in-out infinite; }
+.blob-drift-b { animation: blob-b 32s ease-in-out infinite; }
+.blob-drift-c { animation: blob-c 24s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .blob-drift-a, .blob-drift-b, .blob-drift-c { animation: none; }
+}
+
+::selection {
+  @apply bg-brand-200;
+}
+
+@layer components {
+  /* Chunky, Duolingo-style buttons: thick bottom edge that compresses on press. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-2xl px-4 py-2 text-sm font-extrabold
+      transition-all duration-100 active:translate-y-[3px] active:border-b-0
+      disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn border-b-4 border-brand-700 bg-brand-500 text-white hover:bg-brand-400
+      hover:shadow-[0_0_22px_rgba(255,107,53,0.45)];
+  }
+  .btn-spark {
+    @apply btn border-b-4 border-spark-600 bg-spark-500 text-white hover:brightness-110
+      hover:shadow-[0_0_22px_rgba(124,92,255,0.45)];
+  }
+  .btn-grow {
+    @apply btn border-b-4 border-grow-700 bg-grow-500 text-white hover:bg-grow-600
+      hover:shadow-[0_0_22px_rgba(47,168,79,0.4)];
+  }
+  .btn-ghost {
+    @apply btn border-2 border-b-4 border-cream-200 bg-white/70 text-ink-600 backdrop-blur-md
+      hover:border-brand-200 hover:text-brand-600 hover:shadow-[0_0_18px_rgba(255,107,53,0.2)];
+  }
+  /* Frosted-glass surface — the moving backdrop is faintly visible through it. */
+  .glass {
+    @apply border border-white/60 bg-white/60 shadow-soft backdrop-blur-xl;
+    box-shadow:
+      0 1px 2px rgba(59, 47, 42, 0.05),
+      0 8px 24px rgba(59, 47, 42, 0.07),
+      inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  }
+  .field {
+    @apply rounded-2xl border-2 border-cream-200 bg-white px-3 py-2 text-sm font-semibold text-ink-900
+      placeholder:font-medium placeholder:text-ink-400 transition-colors
+      focus:border-brand-300 focus:outline-none;
+  }
+}

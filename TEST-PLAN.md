@@ -1,0 +1,323 @@
+# BudgetBrain — QA Test Plan
+
+**Version:** 1.0
+**Date:** 2026-08-17
+**Tested build:** `main` branch, local development build
+**Tester:** Nick (solo manual testing pass)
+
+---
+
+## 1. Overview
+
+BudgetBrain is a personal expense tracker that runs entirely on your own computer. You type in what you spent and earned (or upload a CSV file exported from your bank), and it shows you where your money went this month with summary tiles, a colour-coded pie chart, and a six-month bar chart. It can also use Google's Gemini AI to automatically guess a category for each transaction ("TRADER JOE'S #552" → Groceries), point out unusually large purchases, suggest ways to cut spending, and track savings goals by telling you how much you need to put away each week.
+
+Nothing is uploaded anywhere except short trips to the Gemini AI service, and even then only merchant names and monthly category totals are sent — never your full transaction history.
+
+---
+
+## 2. Objectives
+
+1. **Verify functionality** — every feature listed in Section 3 does what a user would reasonably expect it to do.
+2. **Verify graceful handling of invalid and edge-case input** — bad dates, empty fields, zero and negative amounts, oversized files, strange CSV layouts, and characters the app may not expect. The app should explain the problem, not crash or silently save wrong data.
+3. **Verify financial calculations are accurate** — every total, percentage, average, and projection on screen must match what you get doing the same sum by hand or in a calculator.
+4. **Verify safe behaviour when the Gemini AI is unavailable** — no key, an invalid key, an expired free-tier quota, or no internet. The app must keep working for everything that isn't AI, and must say clearly what went wrong.
+5. **Track defects found** — every bug logged in a consistent, reproducible format (Section 7) so it can be fixed and re-tested.
+
+---
+
+## 3. Scope
+
+### In scope
+
+Everything below was confirmed by reading the actual code and the actual screens in this build — not the requirements document.
+
+#### Module 1 — Ledger (transactions in and out)
+
+- **Manual entry form** ("✏️ Jot one down" on the Dashboard) — date picker, description, amount, an expense/income toggle that decides whether the amount is a minus or a plus, and a category dropdown with 15 fixed categories.
+- **Form validation before saving** — blocks empty descriptions, blocks amounts that aren't a positive number with at most two decimal places, and blocks dates in the future ("No fortune-telling — today or earlier!").
+- **Optimistic display** — a new row appears in the list instantly, and disappears again if the server rejects it.
+- **CSV import** (Import tab) — upload a `.csv` file or paste raw CSV text.
+- **Column mapping step** — the app guesses which column is the date, description, and amount from the header names, and you can override every guess before anything is saved.
+- **Two amount layouts** — one single amount column (negative = spending), or separate "debit" and "credit" columns.
+- **"Expenses are positive numbers in this file" checkbox** — flips the sign for banks that export spending as positive numbers.
+- **Date format choice** — a radio button for MM/DD/YYYY vs DD/MM/YYYY that becomes mandatory when the file contains dates like `03/04/2025` that could be read either way.
+- **Preview table** — first 20 rows, with coloured tags showing which columns are being used as date / description / amount.
+- **Import summary screen** — how many rows went in, a list of rows that were skipped and why, and a list of rows that look like duplicates.
+- **1,000-row import cap** — enforced both in the browser and again on the server.
+- **Transaction list** — 50 rows per page, newest first, with Previous/Next paging and a total count.
+- **Filters** — month picker, category dropdown, and a search box that matches text inside descriptions (search waits ~0.3s after you stop typing before running).
+- **Inline category editing** — click a category badge in the list to change it; this also teaches the app that merchant's category for next time.
+- **Delete** — the ✕ on a row, with a confirmation pop-up.
+- **API endpoints behind all of the above** — `GET/POST /api/transactions`, `POST /api/transactions/import`, `PATCH /api/transactions/:id`, `DELETE /api/transactions/:id`.
+
+#### Module 2 — AI Categorization & anomaly flagging
+
+- **"✨ Auto-label" button** on the Dashboard — finds every transaction still marked `Uncategorized` and asks Gemini to categorize them.
+- **Merchant memory (cache)** — before calling the AI, the app checks a local table of merchants it has already seen. `WALMART #4521` and `Walmart #7788` are treated as the same merchant, so it only ever pays for that merchant once.
+- **Batching and pacing** — up to 40 merchants per AI request, with a 5-second pause between requests to stay inside the free tier's limits.
+- **Live progress** — a progress bar and "Batch 2 of 3…" text while a run is going, refreshed once a second.
+- **One run at a time** — starting a second run while one is going returns a "already in progress" error.
+- **"Auto-label them now" hand-off** — the button on the import summary screen that jumps to the Dashboard and immediately starts a categorization run.
+- **Yellow "no key" banner** at the top of the app when no Gemini key is configured.
+- **Anomaly flagging ("👀 Heads up — these stood out")** — highlights unusually large expenses, with a plain-English reason, and a "All good 👍" button to dismiss a flag permanently.
+- **Budget coach ("🧞 Coach me")** — sends only this month's per-category totals and your monthly income to Gemini and returns 3–5 written suggestions; repeat clicks are served from a local cache and cost nothing.
+- **API endpoints** — `POST /api/categorize`, `GET /api/categorize/status`, `POST /api/suggestions`, `POST /api/flags/recompute`, `PATCH /api/flags/:id/dismiss`.
+
+#### Module 3 — Goals
+
+- **Create a savings goal** — name, target amount, deadline date.
+- **Progress bar and percentage** per goal.
+- **"Your pace"** — average weekly net savings over the last 8 weeks, shown at the top of the page and on each goal.
+- **"Needs $X/wk"** — how much you'd have to save weekly to hit the target by the deadline.
+- **"Landing <date>"** — the projected finish date at your current pace, or "not at this pace 😅".
+- **Status badge** — 🏆 You did it! / 🚀 On track / 🐢 A little behind / 🧗 Needs a bigger push, plus a "🔥 So close!" badge at 90%+.
+- **The savings jar** — an animated 3D jar that fills as combined progress across all goals rises, with confetti at 90%.
+- **Delete a goal** — the ✕ with a confirmation pop-up.
+- **API endpoints** — `GET/POST /api/goals`, `PATCH /api/goals/:id`, `DELETE /api/goals/:id`.
+
+#### Module 4 — Dashboard, Settings, and shell
+
+- **Four summary tiles** — Spent this month, Earned this month, Net, and a count of flagged transactions, with numbers that count up when they change.
+- **Category pie (donut)** — spending by category for the selected month, with total in the middle, a legend with amounts and percentages, and consistent colours + emoji per category.
+- **Six-month spending bar chart** — the current month highlighted in orange.
+- **Month picker** — changes the tiles, both charts, and the ledger together; can't be set to a future month.
+- **Settings tab** — monthly income and currency symbol (up to 3 characters).
+- **Tab navigation** — Dashboard / Import / Goals / Settings.
+- **Server-down screen** — "😴 The server's not answering" with a Try again button.
+- **Toast notifications** for successes and errors throughout.
+- **Health check** — `GET /api/health`, which also reports whether a Gemini key is configured.
+- **Rate limiting** — the API accepts a maximum of 300 requests per minute.
+
+### Out of scope
+
+- **Multi-browser testing** — testing on Chrome only; Safari, Firefox, and Edge are not covered.
+- **Mobile devices and tablets** — the layout adapts to narrow windows, but no phone or tablet testing.
+- **Load and performance testing** — no testing with tens of thousands of transactions or many simultaneous users; this is a single-user local app.
+- **Penetration and security testing** — no attempts to break in, inject SQL, or bypass the rate limit.
+- **Deployment / hosting testing** — the app only runs locally; there is no production server to test.
+- **Automated test suites** — see Section 5; no automated tests exist in this build yet.
+- **Gemini's answer quality** — whether "STARBUCKS" is *better* labelled Dining or Other is a judgement call, not a defect. What we test is that the app handles whatever comes back safely.
+- **The 3D savings jar's visual fidelity** — animation smoothness and graphics are cosmetic; only "does it appear and roughly track progress" is checked.
+- **Accessibility audit** — planned for a later phase (Section 5).
+
+---
+
+## 4. Test Environment
+
+| Item | Value |
+|---|---|
+| Operating system | macOS 26.5.2 (Apple Silicon) |
+| Runtime | Node.js v22.20.0 |
+| Browser | Chrome (latest), desktop window |
+| Project location | `/Users/nick/budgetbrain` |
+| Start command | `npm install` once, then `npm run dev` from the project root |
+| App URL (what you test) | **http://localhost:5173** |
+| API URL (behind the scenes) | http://localhost:3001 — you only visit this directly for the API testing phase |
+| Database | SQLite, a single file at `server/data/budgetbrain.db`. Deleting this file resets the app to empty; it is recreated automatically on the next start. |
+| AI service | Google Gemini free tier, model `gemini-flash-latest` |
+| AI call log | `server/logs/gemini.log` — one line per AI call with a timestamp and outcome. Useful for confirming whether a call actually happened or came from the cache. The key is never written here. |
+
+### Starting the app
+
+1. Open Terminal and go to the project folder: `cd /Users/nick/budgetbrain`
+2. Run `npm install` (only needed the first time, or after code changes that add libraries).
+3. Run `npm run dev`. This starts **both** halves of the app at once — the data server on port 3001 and the web page on port 5173.
+4. Open **http://localhost:5173** in Chrome.
+5. To stop, press `Ctrl + C` in that Terminal window.
+
+### Adding a Gemini API key (needed for the AI features)
+
+1. Get a free key from https://aistudio.google.com/apikey
+2. In Terminal, from the project folder, run: `cp server/.env.example server/.env`
+3. Open `server/.env` in a text editor. Replace `your_key_here` with your real key so the line reads `GEMINI_API_KEY=AIza...`
+4. **Stop and restart `npm run dev`.** The key is only read when the server starts, so an edit made while it's running has no effect until you restart.
+5. Confirm it worked: the yellow "🔮 No Gemini key yet" banner at the top of the app should be gone after a refresh.
+
+To test the "no AI available" scenarios, either delete `server/.env`, or set the key to something invalid — and restart the server each time.
+
+### Loading sample data (optional)
+
+`npm run seed` fills the database with about 100 realistic fake transactions across the last five months, sets monthly income to $5,200, deliberately leaves the last ~12 days uncategorized so the ✨ Auto-label button has something to do, and plants two deliberately oversized purchases (an $850 dinner and a $1,799 Apple purchase) so the anomaly flags have something to catch.
+
+⚠️ **`npm run seed` erases all existing transactions, the merchant memory, and the cached coach suggestions.** It does *not* erase goals. Don't run it in the middle of a test unless you mean to start over.
+
+---
+
+## 5. Types of Testing Planned
+
+| Type | Status | What it covers |
+|---|---|---|
+| **Manual functional testing** | **This phase — starting now** | Walking through every feature in Section 3 by hand against a written test case list, confirming each one behaves as expected. |
+| **Exploratory testing** | **This phase** | Unscripted poking around — deliberately unusual input, odd click orders, rapid clicking — aimed at the risk areas in Section 6. |
+| **API testing (Postman)** | Upcoming phase — not started | Calling the endpoints directly, bypassing the web page, to check that the server rejects bad data on its own rather than relying on the browser form to stop it. This matters because the browser's checks and the server's checks are written separately and can disagree. |
+| **Unit & integration testing (Vitest)** | Upcoming phase — not started | Automated tests of the calculation logic in isolation: money maths, CSV date/amount parsing, merchant name normalisation, AI response parsing, and the anomaly boundary rules. The code was deliberately organised into small standalone files so these can be tested without the internet or the database. **No automated tests exist in this build.** |
+| **End-to-end testing (Playwright)** | Upcoming phase — not started | Automated scripts driving a real browser through the main journeys (import a CSV → categorize → check the dashboard) so they can be re-run on every change. |
+| **Accessibility testing (axe / Lighthouse)** | Upcoming phase — not started | Automated checks for colour contrast, keyboard-only navigation, screen-reader labels, and focus order. |
+
+For this pass, only the first two rows apply. The other four are named here so it's clear what is *not* protecting the build today.
+
+---
+
+## 6. High-Risk Areas
+
+These are the specific places most likely to contain bugs, based on how the app is actually built. Each one names the real rule and suggests what to try.
+
+### 6.1 Dates in CSV files
+
+The importer only understands five date shapes: `2026-06-01`, `06/01/2026`, `01/06/2026`, `01-06-2026`, and `Jun 1, 2026` (three-letter or full month names).
+
+- **Two-digit years are not supported at all.** A file with `06/01/26` will reject *every single row* with "unsupported date format". Many real bank exports use two-digit years, so this is the most likely thing to make an entire import fail.
+- **The mandatory MM/DD vs DD/MM choice is decided by looking at only the first 200 rows.** If a 500-row file has clear dates near the top (like `25/12/2025`, which can only be day-first) but an ambiguous one like `03/04/2025` at row 400, the app won't force you to pick a format — it will just skip that one row with an "ambiguous date" message. Try a long file with a late ambiguous date.
+- **Getting the MM/DD vs DD/MM choice wrong is silent.** Choosing MM/DD on a day-first file turns 3 April into 4 March with no warning, and the money lands in the wrong month. Test that the preview and the resulting dashboard month actually match what you intended.
+- **Impossible dates** like `2026-02-30` or `31/02/2026` should be rejected as invalid — check they are, rather than rolling over into March.
+
+### 6.2 The "no future dates" rule and your time zone
+
+Both the form and the server compare against today's date **in UTC time**, not local time. Late in the evening in a time zone behind UTC (or early morning ahead of it), the app's idea of "today" can be a different day from your computer's. Try adding a transaction dated today late at night and near midnight, and check the date picker doesn't refuse a date you'd consider valid, or accept one you'd consider tomorrow.
+
+Also worth checking: the future-date rule applies to **manual entry and imported rows**, but **goal deadlines are not checked at all on the server**. The date picker on the Goals page has a "no earlier than today" limit, but the API itself will happily accept a deadline in 2020. A goal with a past deadline shows "— (past deadline)" where the weekly amount should be — confirm that reads sensibly rather than looking broken.
+
+### 6.3 Amounts and currency symbols
+
+- The importer strips `$ € £ ¥` , spaces, and thousands separators before reading a number. **It does not recognise `₹`, `₩`, `R$`, `CHF`, or any other symbol.** Meanwhile, Settings lets you set the currency symbol to anything up to 3 characters, including `₹`. So you can set the app to rupees and then find that a rupee-denominated CSV fails on every row with "unparseable amount". Test that combination.
+- The **manual entry box** is stricter still — it only strips `$`, commas, and spaces. Typing `€50` there fails, and so does typing `-25` (you're expected to use the 💸 spent / 💰 earned toggle instead of a minus sign). Check the error message actually explains that.
+- **Brackets mean negative** in CSV files: `(45.23)` is read as −$45.23. Test a file that uses that convention.
+- **More than two decimal places is rejected**, not rounded — `10.999` is a skipped row, not $11.00.
+- **Zero amounts are rejected** everywhere. A CSV row of `0.00` is skipped with "amount is zero".
+- Setting the currency symbol **only changes the symbol shown** — no conversion happens. Confirm nothing implies otherwise.
+
+### 6.4 The debit/credit two-column mode
+
+When you pick "Separate debit / credit columns", a row is only valid if **exactly one** of the two has a value. A row with both filled in is skipped ("both debit and credit are set"), and so is a row with neither. Many bank exports put `0.00` in the unused column rather than leaving it blank — those files will fail on every row. This is worth testing specifically because the error message won't obviously point at that cause.
+
+### 6.5 Duplicate detection
+
+A row is called a duplicate when an existing transaction has the **same date, the same amount, and the same simplified merchant name**. The simplified name is made by lowercasing and deleting all digits and punctuation, so `AMAZON.COM*4A2B` and `Amazon com 99` are considered the same merchant.
+
+- **Duplicates are imported anyway**, on purpose — they're only reported as a warning. Confirm the warning is visible enough that you'd notice, and that importing the exact same file twice results in doubled totals as expected.
+- **The reported row numbers can be wrong.** Rows rejected in the browser are numbered by their position in the original file; rows rejected by the server are numbered by their position in the smaller, already-filtered batch that got sent. When any rows are skipped in the browser, "row 12 (server)" in the summary refers to a *different line* than row 12 in your spreadsheet. Test with a file that has a bad row near the top plus a duplicate further down, and check whether the row numbers point where you'd expect.
+- Two genuinely different purchases at the same shop, on the same day, for the same amount (two identical coffees) will be reported as duplicates. That's expected behaviour, not a bug — but check the wording doesn't sound like an accusation.
+
+### 6.6 Anomaly flagging boundaries
+
+There are exactly two flagging rules, and both are *strictly greater than* comparisons:
+
+1. **Category median rule** — an expense is flagged if it is more than 3× the median expense in the *same category* over the previous 90 days, and only if there are **at least 5 earlier transactions** in that category within that window. A 6th transaction triggers the rule; a 5th does not. An expense exactly 3× the median is **not** flagged.
+2. **Income rule** — any single expense more than 30% of your monthly income is flagged. Exactly 30.0% is not flagged. If monthly income is blank, this rule is switched off entirely.
+
+Things to probe:
+- **`Uncategorized` transactions are deliberately excluded from rule 1**, so an enormous uncategorized purchase only gets flagged if it also crosses the 30%-of-income line. Test a huge uncategorized expense with income unset — nothing should flag, which may look like a bug but is intentional.
+- **Income and Transfers are never flagged**, and neither is any positive amount.
+- **Flags do not refresh on their own.** They are only recalculated at the end of a Gemini categorization run — nothing else in the app triggers a recalculation, and there is **no button anywhere in the UI** that does it. So: add a $2,000 expense by hand, and it will *not* be flagged, no matter how obviously it qualifies, until you happen to run Auto-label. Likewise, changing your monthly income in Settings does not re-evaluate existing transactions. This is the single most likely source of "the flags are wrong" reports, and it can only be forced manually by calling `POST /api/flags/recompute` in the API testing phase.
+- **Dismissing a flag is permanent for that transaction.** Once you click "All good 👍", that transaction can never be flagged again, even if you later change its amount or your income. Verify that's acceptable.
+- The **"Worth a look" tile counts flagged transactions across all time**, while the other three tiles next to it are for the selected month only. Switching the month changes three tiles but not the fourth. Confirm whether that reads as broken.
+
+### 6.7 Behaviour when the Gemini key is missing, wrong, or rate-limited
+
+- **No key at all** — the yellow banner appears, and clicking ✨ Auto-label leaves everything `Uncategorized` with a clear message. Everything non-AI must still work fully. Test the whole app in this state.
+- **An invalid or revoked key** — this is the riskier case, because the app only checks that the key box *isn't empty*. With a made-up key like `abc123`, **the yellow banner does not appear**, so the app looks healthy until you actually click a button; only then do you get "Gemini API key missing or invalid". Check that message appears in both places it can happen: the Auto-label run and the "Coach me" button.
+- **Rate limits and server errors** — on a rate-limit or outage, the app waits **15 seconds, then 30 seconds**, before giving up. During that time the progress bar just sits there with no explanation for up to 45+ seconds, which looks like a freeze. Confirm it eventually shows a real message and doesn't leave the button stuck on "Sorting the pile…". The free tier is easy to exhaust, so this is likely to come up naturally.
+- **When a run gives up partway**, the transactions it already handled keep their new categories and the rest stay `Uncategorized` — re-running later should only cost API calls for the ones still missing. Verify a second run is cheap by checking `server/logs/gemini.log`.
+- **A nonsense AI response** is retried once, then those transactions are left `Uncategorized` rather than being given a wrong category. Any category the AI invents that isn't one of the 15 allowed ones is quietly turned into "Other" — so if you see a suspicious cluster of "Other", that's why.
+- **Run progress is held in the server's memory, not in the database.** If the server restarts mid-run (which happens automatically whenever a code file is saved), the progress bar's information is lost and the status resets to idle even though work may have stopped halfway. Test by stopping and restarting `npm run dev` during a long run.
+
+### 6.8 The merchant memory
+
+Every time you change a category by hand, the app records "this merchant means this category" and uses it for all future categorizations — skipping the AI entirely for that merchant.
+
+- **It only applies going forward.** Correcting one Netflix charge does not fix the other Netflix charges already in your list. Users will likely expect it to.
+- **The simplification is aggressive**: digits and punctuation are deleted, so `7-ELEVEN` becomes "eleven", and `SQ *BLUE BOTTLE` becomes "sq blue bottle". A description made only of numbers (`4829571`) simplifies to nothing at all and gets silently skipped by the categorizer — it will just never get a label. Try one.
+- **The name is cut off at 40 characters**, so two long merchant names that only differ near the end are treated as the same merchant.
+- The memory is only cleared by `npm run seed` or by deleting the database file. If an AI mistake gets recorded, it will keep repeating until then.
+
+### 6.9 The search box
+
+Search is a plain "contains this text" match with **no protection for wildcard characters**. In this kind of database search, `%` means "anything" and `_` means "any one character". So searching for `50%` matches things you wouldn't expect, and searching `_` matches almost everything. Worth confirming what actually happens.
+
+Also note search only looks at the **description**, never the category or the amount, and it always combines with the currently selected month — so a search that "finds nothing" may just be the month filter.
+
+### 6.10 Goal maths
+
+- **All goals share one pot.** Progress toward a goal is calculated as *total income minus total expenses since the day that goal was created*, across your whole account. There is no way to put money into a specific goal. So two goals created on the same day will always show the identical amount saved, and creating a third doesn't divide anything up. Test with three goals and confirm the numbers don't imply otherwise.
+- **Progress is capped between 0 and the target.** If you spent more than you earned since creating a goal, the bar sits at 0%, not a negative number.
+- **"Your pace" is the average over the last 8 weeks**, including large one-off items. One big payday or one big purchase noticeably swings it, which in turn swings the "Landing" date and the on-track/behind badge. Compare the figure against the ledger by hand.
+- **A negative pace means "Landing" shows "not at this pace 😅"** and the status becomes "🧗 Needs a bigger push". A brand-new database with no income at all will put every goal in that state.
+- **Weeks left is calculated in UTC**, same time-zone caveat as 6.2, and is rounded to one decimal — a deadline of "tomorrow" may read as 0.1 weeks.
+
+### 6.11 Money display and rounding
+
+Every amount is stored as a whole number of cents and only converted to dollars at the moment it's shown, specifically to avoid rounding errors. This should be checked rather than assumed:
+
+- Add several amounts ending in `.01`, `.05`, and `.99` and confirm the tile totals match a calculator exactly.
+- Check the pie chart percentages — they're each rounded to a whole number independently, so they may add up to 99% or 101%.
+- Check the bar chart's axis labels, which shorten to forms like `$1.2k`, against the exact values in the tooltip.
+- Confirm the **Net** tile equals Earned minus Spent exactly.
+- Confirm **Transfers are excluded** from Spent, Earned, Net, both charts, the goal pace, and the anomaly rules. Add a transaction categorized as Transfers and check every number stays put.
+
+### 6.12 Rate limiting and rapid clicking
+
+The server accepts 300 requests per minute. While a categorization run is going, the page checks progress once a second on its own, on top of everything else. Rapidly switching months, typing in search, and clicking buttons during a run could push past the limit, at which point requests start failing with confusing errors. Try to provoke it.
+
+### 6.13 CSV files that aren't quite CSV
+
+- A file with **fewer than two columns** is rejected with a clear message — check it.
+- A file with **no header row** will treat your first transaction as the column names, silently losing it. Try it.
+- **Excel exports saved as UTF-16 or with a byte-order mark** may produce a garbled first column name — worth one test with a file saved straight out of Excel rather than hand-typed.
+- **Duplicate column headers** (two columns both called "Amount") are automatically renamed behind the scenes, which may make the dropdowns confusing.
+- **Over 1,000 rows** is refused up front with a message telling you to split the file — confirm at 1,000 and 1,001 rows.
+- Blank lines at the end of a file are ignored rather than being reported as errors.
+
+### 6.14 Cosmetic but confusing
+
+- Every imported row is recorded as having been categorized "manually", even though you never chose anything — hovering a category badge on an imported row says "Labeled by: manual". Minor, but it's misleading.
+- The "waiting for a label" count next to the ✨ button counts **all** uncategorized transactions across all time, not just the selected month, so it won't match what you see in a filtered list.
+- The "Coach me" suggestions are cached per month **and** per set of numbers — adding a single transaction changes the numbers and so causes a fresh AI call, while clicking twice in a row does not. Verify against `server/logs/gemini.log`.
+
+---
+
+## 7. Defect Tracking
+
+Every bug found is logged as a **GitHub Issue** on this repository, one issue per bug, containing:
+
+| Field | What goes in it |
+|---|---|
+| **Title** | A short, specific summary — "CSV import fails on all rows when dates use 2-digit years", not "import broken". |
+| **Steps to reproduce** | Numbered steps someone else can follow from a fresh start, including any file or data used. Attach the CSV file if one was involved. |
+| **Expected result** | What should have happened. |
+| **Actual result** | What actually happened, word for word where there's an error message. |
+| **Severity** | **Critical** — data loss, wrong money totals, or the app won't run. **High** — a main feature doesn't work and there's no way around it. **Medium** — a feature misbehaves but there's a workaround. **Low** — cosmetic, wording, or layout. |
+| **Screenshot** | A screenshot or short screen recording of the problem. |
+
+Add the label `bug`, plus the module it belongs to (`ledger`, `ai`, `goals`, `dashboard`).
+
+---
+
+## 8. Entry & Exit Criteria
+
+### Entry criteria — testing starts only once all of these are true
+
+1. `npm install` completes without errors.
+2. `npm run build` completes without errors.
+3. `npm run dev` starts both halves of the app with no errors in the Terminal.
+4. http://localhost:5173 loads and shows the Dashboard, not the "😴 The server's not answering" screen.
+5. A Gemini API key is configured and the yellow "no key" banner is gone (a separate deliberate no-key pass comes later).
+6. The test case list (Section 9) is written and reviewed.
+7. The database is in a known state — either freshly seeded with `npm run seed`, or freshly emptied.
+
+### Exit criteria — testing is finished when all of these are true
+
+1. Every test case in the test case list has been run and marked Pass, Fail, or Blocked.
+2. Every **Critical** and **High** severity bug is fixed and re-tested as passing.
+3. Every remaining **Medium** and **Low** bug is logged as a GitHub Issue with an agreed decision to fix later or accept.
+4. All four modules (Ledger, AI Categorization, Goals, Dashboard) have been tested both **with** a working Gemini key and **without** one.
+5. Every calculation listed in Section 6.11 has been verified by hand against a calculator.
+6. The final testing summary (Section 9) is written.
+
+---
+
+## 9. Deliverables
+
+1. **This test plan** (`TEST-PLAN.md`) — what will be tested, where, and what the biggest risks are.
+2. **A test case list** (`TEST-CASES.md`, to be written next) — the individual step-by-step checks, each with its steps, expected result, and a column to record Pass / Fail / Blocked.
+3. **Logged bugs** — GitHub Issues in the format set out in Section 7, one per defect.
+4. **A final testing summary** (`TEST-SUMMARY.md`) — how many test cases were run and how many passed, a list of the bugs found grouped by severity, which areas are solid, which areas are still risky, and a plain recommendation on whether the app is ready to be deployed.
