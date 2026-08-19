@@ -72,13 +72,15 @@ export function TransactionList({
                 }`}
               >
                 <td className="whitespace-nowrap px-3 py-2.5 font-semibold tabular-nums text-ink-400">{tx.date}</td>
-                <td className="max-w-64 truncate px-3 py-2.5 font-bold text-ink-900" title={tx.description}>
-                  {tx.flagged === 1 && (
-                    <span title={tx.flag_reason ?? "Worth a look"} className="mr-1" aria-label="Worth a look">
-                      👀
-                    </span>
-                  )}
-                  {tx.description}
+                <td className="max-w-64 px-3 py-2.5 font-bold text-ink-900" title={tx.description}>
+                  <span className="line-clamp-2 break-words">
+                    {tx.flagged === 1 && (
+                      <span title={tx.flag_reason ?? "Worth a look"} className="mr-1" aria-label="Worth a look">
+                        👀
+                      </span>
+                    )}
+                    {tx.description}
+                  </span>
                 </td>
                 <td className="px-3 py-2.5">
                   {editingId === tx.id ? (
