@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { api } from "./lib/api";
-import type { Settings } from "./lib/types";
+import { api, ApiError } from "./lib/api";
+import type { Settings, User } from "./lib/types";
 import { Backdrop } from "./components/Backdrop";
 import { Card, Skeleton } from "./components/Bits";
 import { DashboardPage } from "./pages/DashboardPage";
 import { GoalsPage } from "./pages/GoalsPage";
 import { ImportPage } from "./pages/ImportPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { LoginPage } from "./pages/LoginPage";
+import { SignupPage } from "./pages/SignupPage";
+import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
+import { ResetPasswordPage } from "./pages/ResetPasswordPage";
 
 type Tab = "dashboard" | "import" | "goals" | "settings";
+type AuthView = "login" | "signup" | "forgot";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "🏠" },
@@ -17,6 +22,16 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "goals", label: "Goals", icon: "🎯" },
   { id: "settings", label: "Settings", icon: "⚙️" },
 ];
+
+// A password-reset link (from the email) lands here as ?reset_token=..., no
+// matter whether this browser currently has an active session or not.
+function readResetToken(): string | null {
+  return new URLSearchParams(window.location.search).get("reset_token");
+}
+
+function clearResetTokenFromUrl() {
+  window.history.replaceState(null, "", window.location.pathname);
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
@@ -26,7 +41,33 @@ export default function App() {
   // Set when the import flow hands off to the dashboard with "categorize now".
   const [autoCategorize, setAutoCategorize] = useState(false);
 
+  const [user, setUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authView, setAuthView] = useState<AuthView>("login");
+  const [resetToken, setResetToken] = useState<string | null>(() => readResetToken());
+
+  // Is there already a logged-in session (a cookie from an earlier visit)?
+  // This has to resolve before we know whether to show the app or the
+  // login screen.
   useEffect(() => {
+    api
+      .get<User>("/api/auth/me")
+      .then((u) => setUser(u))
+      .catch((err) => {
+        // A real network failure (server not running) is a different
+        // problem than "not logged in" — don't show the login form for it.
+        if (err instanceof ApiError && err.status === 0) {
+          setLoadError(err.message);
+        }
+        setUser(null);
+      })
+      .finally(() => setAuthChecked(true));
+  }, []);
+
+  // Only fetch the rest of the app's data once someone's actually logged in
+  // — these routes now require a session.
+  useEffect(() => {
+    if (!user) return;
     Promise.all([
       api.get<{ ok: boolean; gemini_key_configured: boolean }>("/api/health"),
       api.get<Settings>("/api/settings"),
@@ -36,7 +77,31 @@ export default function App() {
         setSettings(s);
       })
       .catch(() => setLoadError("Can't reach the BudgetBrain server. Is `npm run dev` running?"));
-  }, []);
+  }, [user]);
+
+  function handleAuthed(u: User) {
+    setUser(u);
+    setSettings(null);
+    setHealth(null);
+    setTab("dashboard");
+    if (resetToken) {
+      setResetToken(null);
+      clearResetTokenFromUrl();
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await api.post("/api/auth/logout");
+    } catch {
+      // Best-effort — clear local state either way so the UI never gets
+      // stuck showing someone else's data.
+    }
+    setUser(null);
+    setSettings(null);
+    setHealth(null);
+    setAuthView("login");
+  }
 
   if (loadError) {
     return (
@@ -49,6 +114,49 @@ export default function App() {
           </button>
         </Card>
       </div>
+    );
+  }
+
+  // A reset link takes priority over everything else below — someone can
+  // land here whether or not their browser still has an active session.
+  if (resetToken) {
+    return (
+      <ResetPasswordPage
+        token={resetToken}
+        onReset={handleAuthed}
+        onGoToLogin={() => {
+          setResetToken(null);
+          clearResetTokenFromUrl();
+        }}
+      />
+    );
+  }
+
+  if (!authChecked) {
+    return (
+      <div className="mx-auto max-w-md p-8">
+        <Card>
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="mt-3 h-10 w-full" />
+          <Skeleton className="mt-3 h-10 w-full" />
+        </Card>
+      </div>
+    );
+  }
+
+  if (!user) {
+    if (authView === "signup") {
+      return <SignupPage onSignedUp={handleAuthed} onGoToLogin={() => setAuthView("login")} />;
+    }
+    if (authView === "forgot") {
+      return <ForgotPasswordPage onGoToLogin={() => setAuthView("login")} />;
+    }
+    return (
+      <LoginPage
+        onLoggedIn={handleAuthed}
+        onGoToSignup={() => setAuthView("signup")}
+        onGoToForgot={() => setAuthView("forgot")}
+      />
     );
   }
 
@@ -98,6 +206,9 @@ export default function App() {
             </button>
           ))}
         </nav>
+        <button type="button" onClick={handleLogout} className="btn-ghost" title={user.email}>
+          Log out
+        </button>
       </header>
 
       {health && !health.gemini_key_configured && (

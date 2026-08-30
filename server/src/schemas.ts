@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CATEGORIES } from "./lib/categories.js";
 import { isValidISODate, todayISO } from "./lib/dates.js";
+import { isValidEmail } from "./lib/auth.js";
 
 export const isoDate = z
   .string()
@@ -73,3 +74,35 @@ export function zodFieldErrors(error: z.ZodError) {
   }
   return fields;
 }
+
+// --- Auth ---
+
+const email = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .refine(isValidEmail, { message: "Enter a valid email address" });
+
+const password = z
+  .string()
+  .min(8, "Password must be at least 8 characters")
+  .max(200);
+
+export const signupSchema = z.object({
+  email,
+  password,
+});
+
+export const loginSchema = z.object({
+  email,
+  password: z.string().min(1, "Password is required"),
+});
+
+export const forgotPasswordSchema = z.object({
+  email,
+});
+
+export const resetPasswordSchema = z.object({
+  token: z.string().min(1, "Missing reset token"),
+  password,
+});

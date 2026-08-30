@@ -21,6 +21,7 @@ summaryRouter.get("/", (req, res) => {
   const parsed = querySchema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: "month must be YYYY-MM" });
   const { month } = parsed.data;
+  const userId = req.userId;
 
   const totals = db
     .prepare(
@@ -28,9 +29,9 @@ summaryRouter.get("/", (req, res) => {
          COALESCE(SUM(CASE WHEN amount_cents < 0 AND category != 'Transfers' THEN -amount_cents ELSE 0 END), 0) AS spent_cents,
          COALESCE(SUM(CASE WHEN amount_cents > 0 AND category != 'Transfers' THEN amount_cents ELSE 0 END), 0) AS income_cents
        FROM transactions
-       WHERE substr(date, 1, 7) = ?`
+       WHERE substr(date, 1, 7) = ? AND user_id = ?`
     )
-    .get(month) as { spent_cents: number; income_cents: number };
+    .get(month, userId) as { spent_cents: number; income_cents: number };
 
   const byCategory = db
     .prepare(
@@ -39,10 +40,11 @@ summaryRouter.get("/", (req, res) => {
        WHERE substr(date, 1, 7) = ?
          AND amount_cents < 0
          AND category NOT IN ('Income', 'Transfers')
+         AND user_id = ?
        GROUP BY category
        ORDER BY spent_cents DESC`
     )
-    .all(month) as { category: string; spent_cents: number }[];
+    .all(month, userId) as { category: string; spent_cents: number }[];
 
   const months = trailingMonths(month, 6);
   const spendRows = db
@@ -50,10 +52,10 @@ summaryRouter.get("/", (req, res) => {
       `SELECT substr(date, 1, 7) AS month, COALESCE(SUM(-amount_cents), 0) AS spent_cents
        FROM transactions
        WHERE substr(date, 1, 7) >= ? AND substr(date, 1, 7) <= ?
-         AND amount_cents < 0 AND category != 'Transfers'
+         AND amount_cents < 0 AND category != 'Transfers' AND user_id = ?
        GROUP BY substr(date, 1, 7)`
     )
-    .all(months[0], months[months.length - 1]) as { month: string; spent_cents: number }[];
+    .all(months[0], months[months.length - 1], userId) as { month: string; spent_cents: number }[];
   const spendByMonth = new Map(spendRows.map((r) => [r.month, r.spent_cents]));
   const six_month_series = months.map((m) => ({
     month: m,
@@ -61,8 +63,8 @@ summaryRouter.get("/", (req, res) => {
   }));
 
   const { flagged_count } = db
-    .prepare("SELECT COUNT(*) AS flagged_count FROM transactions WHERE flagged = 1")
-    .get() as { flagged_count: number };
+    .prepare("SELECT COUNT(*) AS flagged_count FROM transactions WHERE flagged = 1 AND user_id = ?")
+    .get(userId) as { flagged_count: number };
 
   res.json({
     month,

@@ -10,26 +10,26 @@ import { getSettings } from "./settings.js";
 
 export const aiRouter = Router();
 
-aiRouter.post("/categorize", (_req, res) => {
-  const result = startCategorization();
+aiRouter.post("/categorize", (req, res) => {
+  const result = startCategorization(req.userId!);
   if ("error" in result) return res.status(409).json(result);
   res.status(202).json(result);
 });
 
-aiRouter.get("/categorize/status", (_req, res) => {
-  res.json(getRunStatus());
+aiRouter.get("/categorize/status", (req, res) => {
+  res.json(getRunStatus(req.userId!));
 });
 
-aiRouter.post("/flags/recompute", (_req, res) => {
-  res.json(recomputeFlags());
+aiRouter.post("/flags/recompute", (req, res) => {
+  res.json(recomputeFlags(req.userId!));
 });
 
 aiRouter.patch("/flags/:id/dismiss", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id" });
   const info = db
-    .prepare("UPDATE transactions SET flagged = 0, flag_dismissed = 1 WHERE id = ?")
-    .run(id);
+    .prepare("UPDATE transactions SET flagged = 0, flag_dismissed = 1 WHERE id = ? AND user_id = ?")
+    .run(id, req.userId);
   if (info.changes === 0) return res.status(404).json({ error: "Transaction not found" });
   res.json({ ok: true });
 });
@@ -48,7 +48,7 @@ aiRouter.post("/suggestions", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: "month must be YYYY-MM" });
   const month = parsed.data.month ?? todayISO().slice(0, 7);
 
-  const { monthly_income_cents } = getSettings();
+  const { monthly_income_cents } = getSettings(req.userId!);
   if (monthly_income_cents == null || monthly_income_cents <= 0) {
     return res.status(400).json({
       error: "income_not_set",
@@ -61,10 +61,10 @@ aiRouter.post("/suggestions", async (req, res) => {
       `SELECT category, COALESCE(SUM(-amount_cents), 0) AS spent_cents
        FROM transactions
        WHERE substr(date, 1, 7) = ? AND amount_cents < 0
-         AND category NOT IN ('Income', 'Transfers')
+         AND category NOT IN ('Income', 'Transfers') AND user_id = ?
        GROUP BY category ORDER BY spent_cents DESC`
     )
-    .all(month) as { category: string; spent_cents: number }[];
+    .all(month, req.userId) as { category: string; spent_cents: number }[];
 
   if (byCategory.length === 0) {
     return res.status(400).json({

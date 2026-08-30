@@ -23,23 +23,30 @@ export interface RunStatus {
   finished_at: string | null;
 }
 
-let run: RunStatus = {
-  run_id: null,
-  status: "idle",
-  total_transactions: 0,
-  cached_count: 0,
-  ai_count: 0,
-  fallback_count: 0,
-  batches_total: 0,
-  batches_done: 0,
-  batches_skipped: 0,
-  errors: [],
-  started_at: null,
-  finished_at: null,
-};
+function idleStatus(): RunStatus {
+  return {
+    run_id: null,
+    status: "idle",
+    total_transactions: 0,
+    cached_count: 0,
+    ai_count: 0,
+    fallback_count: 0,
+    batches_total: 0,
+    batches_done: 0,
+    batches_skipped: 0,
+    errors: [],
+    started_at: null,
+    finished_at: null,
+  };
+}
 
-export function getRunStatus(): RunStatus {
-  return run;
+// Keyed by user id so two people running "Categorize" at the same time
+// don't stomp on each other's progress (this used to be a single shared
+// variable, back when the app only ever had one user).
+const runs = new Map<number, RunStatus>();
+
+export function getRunStatus(userId: number): RunStatus {
+  return runs.get(userId) ?? idleStatus();
 }
 
 interface BatchItem {
@@ -51,8 +58,11 @@ interface BatchItem {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const assignStmt = () =>
-  db.prepare("UPDATE transactions SET category = ?, category_source = ? WHERE id = ?");
+  db.prepare("UPDATE transactions SET category = ?, category_source = ? WHERE id = ? AND user_id = ?");
 
+// The merchant cache is intentionally shared across everyone's accounts —
+// it's just "merchant name -> category", not sensitive, and it means one
+// person categorizing "Trader Joe's" saves everyone else an API call too.
 function writeCache(key: string, category: string) {
   db.prepare(
     `INSERT INTO merchant_category_cache (merchant_key, category, hit_count)
@@ -99,32 +109,28 @@ function parseBatchResponse(text: string, itemCount: number): Map<number, string
 }
 
 /**
- * Kick off a categorization run over all Uncategorized transactions.
+ * Kick off a categorization run over one user's Uncategorized transactions.
  * Returns the run id immediately; work continues in the background and is
- * observable via getRunStatus(). Only one run at a time.
+ * observable via getRunStatus(userId). Only one run at a time per user.
  */
-export function startCategorization(): { run_id: string } | { error: string } {
-  if (run.status === "running") return { error: "A categorization run is already in progress" };
+export function startCategorization(userId: number): { run_id: string } | { error: string } {
+  if (runs.get(userId)?.status === "running") {
+    return { error: "A categorization run is already in progress" };
+  }
 
   const uncategorized = db
-    .prepare("SELECT id, description FROM transactions WHERE category = 'Uncategorized'")
-    .all() as { id: number; description: string }[];
+    .prepare("SELECT id, description FROM transactions WHERE category = 'Uncategorized' AND user_id = ?")
+    .all(userId) as { id: number; description: string }[];
 
   const runId = randomUUID();
-  run = {
+  const status: RunStatus = {
+    ...idleStatus(),
     run_id: runId,
     status: "running",
     total_transactions: uncategorized.length,
-    cached_count: 0,
-    ai_count: 0,
-    fallback_count: 0,
-    batches_total: 0,
-    batches_done: 0,
-    batches_skipped: 0,
-    errors: [],
     started_at: new Date().toISOString(),
-    finished_at: null,
   };
+  runs.set(userId, status);
 
   // Pass 1 — merchant cache. No API call for anything we've seen before.
   const cacheGet = db.prepare(
@@ -140,14 +146,14 @@ export function startCategorization(): { run_id: string } | { error: string } {
     for (const tx of uncategorized) {
       const key = merchantKey(tx.description);
       if (!key) {
-        run.fallback_count++;
+        status.fallback_count++;
         continue;
       }
       const hit = cacheGet.get(key) as { category: string } | undefined;
       if (hit) {
-        assign.run(hit.category, "cache", tx.id);
+        assign.run(hit.category, "cache", tx.id, userId);
         cacheHit.run(key);
-        run.cached_count++;
+        status.cached_count++;
       } else {
         // Deduplicate identical merchant keys so one API answer covers all
         // matching transactions.
@@ -163,20 +169,20 @@ export function startCategorization(): { run_id: string } | { error: string } {
   for (let i = 0; i < items.length; i += BATCH_SIZE) {
     batches.push(items.slice(i, i + BATCH_SIZE));
   }
-  run.batches_total = batches.length;
+  status.batches_total = batches.length;
 
   if (batches.length === 0) {
-    recomputeFlags();
-    run.status = "done";
-    run.finished_at = new Date().toISOString();
+    recomputeFlags(userId);
+    status.status = "done";
+    status.finished_at = new Date().toISOString();
     return { run_id: runId };
   }
 
-  void processBatches(batches);
+  void processBatches(batches, userId, status);
   return { run_id: runId };
 }
 
-async function processBatches(batches: BatchItem[][]) {
+async function processBatches(batches: BatchItem[][], userId: number, status: RunStatus) {
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
     try {
@@ -186,29 +192,29 @@ async function processBatches(batches: BatchItem[][]) {
         batch.forEach((item, idx) => {
           const category = results.get(idx);
           if (category) {
-            for (const id of item.txIds) assign.run(category, "ai", id);
+            for (const id of item.txIds) assign.run(category, "ai", id, userId);
             writeCache(item.key, category);
-            run.ai_count += item.txIds.length;
+            status.ai_count += item.txIds.length;
           } else {
             // Model skipped this line — leave Uncategorized for a later run.
-            run.fallback_count += item.txIds.length;
+            status.fallback_count += item.txIds.length;
           }
         });
       })();
-      run.batches_done++;
+      status.batches_done++;
     } catch (e) {
       if (e instanceof GeminiError && (e.kind === "rate_limit" || e.kind === "server")) {
         // Backoff already exhausted — skip everything left and let the user
         // re-run later (requirements 5.3).
-        run.batches_skipped = batches.length - b;
-        run.errors.push(
-          `${e.message} after retries — ${run.batches_skipped} batch(es) skipped. Re-run categorization later; cached merchants won't cost API calls.`
+        status.batches_skipped = batches.length - b;
+        status.errors.push(
+          `${e.message} after retries — ${status.batches_skipped} batch(es) skipped. Re-run categorization later; cached merchants won't cost API calls.`
         );
         break;
       }
       if (e instanceof GeminiError && (e.kind === "no_key" || e.kind === "http" || e.kind === "network")) {
-        run.batches_skipped = batches.length - b;
-        run.errors.push(
+        status.batches_skipped = batches.length - b;
+        status.errors.push(
           e.kind === "no_key" || e.status === 400 || e.status === 403
             ? "Gemini API key missing or invalid — transactions were left as Uncategorized. Add a valid key to server/.env and re-run."
             : `${e.message} — remaining batches skipped.`
@@ -216,20 +222,20 @@ async function processBatches(batches: BatchItem[][]) {
         break;
       }
       // Parse failures for a single batch: fall back, keep going.
-      run.fallback_count += batch.reduce((n, it) => n + it.txIds.length, 0);
-      run.errors.push(`Batch ${b + 1}: unparseable response after retry — left as Uncategorized.`);
-      run.batches_done++;
+      status.fallback_count += batch.reduce((n, it) => n + it.txIds.length, 0);
+      status.errors.push(`Batch ${b + 1}: unparseable response after retry — left as Uncategorized.`);
+      status.batches_done++;
     }
     if (b < batches.length - 1) await sleep(BATCH_DELAY_MS);
   }
 
   try {
-    recomputeFlags();
+    recomputeFlags(userId);
   } catch (e) {
-    run.errors.push(`Anomaly recompute failed: ${String(e)}`);
+    status.errors.push(`Anomaly recompute failed: ${String(e)}`);
   }
-  run.status = "done";
-  run.finished_at = new Date().toISOString();
+  status.status = "done";
+  status.finished_at = new Date().toISOString();
 }
 
 /** One Gemini call for a batch; on a parse failure, retry the batch once. */

@@ -20,6 +20,48 @@ function fmt(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+export interface AnomalyCheckInput {
+  category: string;
+  amountCentsAbs: number;
+  priorCategoryAmountsCentsAbs: number[];
+  monthlyIncomeCents: number | null;
+}
+
+/**
+ * Pure boundary-rule evaluation (requirements 5.4), extracted out of
+ * recomputeFlags so it can be unit-tested without a database:
+ *  - expense > 3x the median of `priorCategoryAmountsCentsAbs`, only when
+ *    there are >=5 prior amounts and the category isn't "Uncategorized";
+ *  - expense > 30% of monthlyIncomeCents, when income is set and > 0.
+ * Returns one human-readable reason per rule that fired (empty = not flagged).
+ * Behavior is unchanged from before this refactor — recomputeFlags below
+ * now just calls this instead of doing the same math inline.
+ */
+export function evaluateAnomaly(input: AnomalyCheckInput): string[] {
+  const { category, amountCentsAbs, priorCategoryAmountsCentsAbs, monthlyIncomeCents } = input;
+  const reasons: string[] = [];
+
+  if (category !== "Uncategorized" && priorCategoryAmountsCentsAbs.length >= 5) {
+    const med = median(priorCategoryAmountsCentsAbs);
+    if (med > 0 && amountCentsAbs > 3 * med) {
+      reasons.push(
+        `${fmt(amountCentsAbs)} is more than 3× the 90-day median for ${category} (${fmt(med)})`
+      );
+    }
+  }
+
+  if (monthlyIncomeCents != null && monthlyIncomeCents > 0) {
+    const threshold = Math.round(monthlyIncomeCents * 0.3);
+    if (amountCentsAbs > threshold) {
+      reasons.push(
+        `${fmt(amountCentsAbs)} exceeds 30% of your monthly income (${fmt(monthlyIncomeCents)})`
+      );
+    }
+  }
+
+  return reasons;
+}
+
 /**
  * Local anomaly detection (no API calls), requirements 5.4:
  *  - expense > 3× the median expense in its category over the trailing 90
@@ -28,16 +70,16 @@ function fmt(cents: number): string {
  * Dismissed flags stay dismissed across recomputes (flag_dismissed column —
  * assumption noted in README).
  */
-export function recomputeFlags(): { flagged_count: number } {
-  const { monthly_income_cents } = getSettings();
+export function recomputeFlags(userId: number): { flagged_count: number } {
+  const { monthly_income_cents } = getSettings(userId);
   const expenses = db
     .prepare(
       `SELECT id, date, category, amount_cents, flag_dismissed
        FROM transactions
-       WHERE amount_cents < 0 AND category NOT IN ('Income', 'Transfers')
+       WHERE amount_cents < 0 AND category NOT IN ('Income', 'Transfers') AND user_id = ?
        ORDER BY date ASC, id ASC`
     )
-    .all() as ExpenseRow[];
+    .all(userId) as ExpenseRow[];
 
   const byCategory = new Map<string, ExpenseRow[]>();
   for (const e of expenses) {
@@ -50,8 +92,6 @@ export function recomputeFlags(): { flagged_count: number } {
 
   for (const e of expenses) {
     const abs = -e.amount_cents;
-    const reasons: string[] = [];
-
     const peers = byCategory.get(e.category)!;
     const windowStart = addDaysISO(e.date, -90);
     const prior = peers.filter(
@@ -59,25 +99,13 @@ export function recomputeFlags(): { flagged_count: number } {
         (p.date < e.date || (p.date === e.date && p.id < e.id)) &&
         p.date >= windowStart
     );
-    // The median rule only makes sense within a real category — comparing
-    // against the "Uncategorized" grab-bag would flag noise.
-    if (e.category !== "Uncategorized" && prior.length >= 5) {
-      const med = median(prior.map((p) => -p.amount_cents));
-      if (med > 0 && abs > 3 * med) {
-        reasons.push(
-          `${fmt(abs)} is more than 3× the 90-day median for ${e.category} (${fmt(med)})`
-        );
-      }
-    }
 
-    if (monthly_income_cents != null && monthly_income_cents > 0) {
-      const threshold = Math.round(monthly_income_cents * 0.3);
-      if (abs > threshold) {
-        reasons.push(
-          `${fmt(abs)} exceeds 30% of your monthly income (${fmt(monthly_income_cents)})`
-        );
-      }
-    }
+    const reasons = evaluateAnomaly({
+      category: e.category,
+      amountCentsAbs: abs,
+      priorCategoryAmountsCentsAbs: prior.map((p) => -p.amount_cents),
+      monthlyIncomeCents: monthly_income_cents,
+    });
 
     const shouldFlag = reasons.length > 0 && !e.flag_dismissed;
     updates.push({
@@ -87,11 +115,11 @@ export function recomputeFlags(): { flagged_count: number } {
     });
   }
 
-  const stmt = db.prepare("UPDATE transactions SET flagged = ?, flag_reason = ? WHERE id = ?");
+  const stmt = db.prepare("UPDATE transactions SET flagged = ?, flag_reason = ? WHERE id = ? AND user_id = ?");
   let flagged = 0;
   db.transaction(() => {
     for (const u of updates) {
-      stmt.run(u.flagged, u.reason, u.id);
+      stmt.run(u.flagged, u.reason, u.id, userId);
       if (u.flagged) flagged++;
     }
   })();

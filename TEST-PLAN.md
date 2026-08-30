@@ -88,6 +88,16 @@ Everything below was confirmed by reading the actual code and the actual screens
 - **Health check** — `GET /api/health`, which also reports whether a Gemini key is configured.
 - **Rate limiting** — the API accepts a maximum of 300 requests per minute.
 
+#### Module 5 — Authentication
+
+- **Sign up** — email + password (minimum 8 characters); a friendly, on-brand form matching the rest of the app's style.
+- **Every account is private** — each signup gets its own empty ledger, goals, and settings. The one exception: whichever account signs up *first* automatically inherits any pre-existing data from before login existed (see the README's "Legacy data" note) — every account after that starts genuinely empty.
+- **Log in / log out** — session-cookie based (not a token you can copy out of the browser). Logging out ends the session server-side, not just in the browser.
+- **Forgot password** — always shows the same "if an account exists…" message whether or not the email is real, so the form can't be used to find out who has an account. The actual reset link is emailed (if `RESEND_API_KEY` is configured) or printed to the server's console (if it isn't).
+- **Reset link** — a one-hour, single-use link (`?reset_token=...`) that sets a new password and logs you straight back in; using the same link twice fails the second time.
+- **Every other screen requires a session** — Dashboard, Import, Goals, and Settings all 401 without one; the app shows the login screen instead of any of them until you're signed in.
+- **API endpoints** — `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`, `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`.
+
 ### Out of scope
 
 - **Multi-browser testing** — testing on Chrome only; Safari, Firefox, and Edge are not covered.
@@ -122,7 +132,7 @@ Everything below was confirmed by reading the actual code and the actual screens
 1. Open Terminal and go to the project folder: `cd /Users/nick/budgetbrain`
 2. Run `npm install` (only needed the first time, or after code changes that add libraries).
 3. Run `npm run dev`. This starts **both** halves of the app at once — the data server on port 3001 and the web page on port 5173.
-4. Open **http://localhost:5173** in Chrome.
+4. Open **http://localhost:5173** in Chrome. You'll land on the login screen — sign up with any email/password (8+ characters) to create your own account, or log in with the seeded demo account below if you've already run `npm run seed`.
 5. To stop, press `Ctrl + C` in that Terminal window.
 
 ### Adding a Gemini API key (needed for the AI features)
@@ -137,7 +147,7 @@ To test the "no AI available" scenarios, either delete `server/.env`, or set the
 
 ### Loading sample data (optional)
 
-`npm run seed` fills the database with about 100 realistic fake transactions across the last five months, sets monthly income to $5,200, deliberately leaves the last ~12 days uncategorized so the ✨ Auto-label button has something to do, and plants two deliberately oversized purchases (an $850 dinner and a $1,799 Apple purchase) so the anomaly flags have something to catch.
+`npm run seed` fills the database with about 100 realistic fake transactions across the last five months, sets monthly income to $5,200, deliberately leaves the last ~12 days uncategorized so the ✨ Auto-label button has something to do, and plants two deliberately oversized purchases (an $850 dinner and a $1,799 Apple purchase) so the anomaly flags have something to catch. It seeds one account — `demo@budgetbrain.local` / `password123` by default (pass a different email as an argument, e.g. `npm run seed -- me@example.com`, to seed a different account instead).
 
 ⚠️ **`npm run seed` erases all existing transactions, the merchant memory, and the cached coach suggestions.** It does *not* erase goals. Don't run it in the middle of a test unless you mean to start over.
 
@@ -149,9 +159,9 @@ To test the "no AI available" scenarios, either delete `server/.env`, or set the
 |---|---|---|
 | **Manual functional testing** | **This phase — starting now** | Walking through every feature in Section 3 by hand against a written test case list, confirming each one behaves as expected. |
 | **Exploratory testing** | **This phase** | Unscripted poking around — deliberately unusual input, odd click orders, rapid clicking — aimed at the risk areas in Section 6. |
-| **API testing (Postman)** | Upcoming phase — not started | Calling the endpoints directly, bypassing the web page, to check that the server rejects bad data on its own rather than relying on the browser form to stop it. This matters because the browser's checks and the server's checks are written separately and can disagree. |
-| **Unit & integration testing (Vitest)** | Upcoming phase — not started | Automated tests of the calculation logic in isolation: money maths, CSV date/amount parsing, merchant name normalisation, AI response parsing, and the anomaly boundary rules. The code was deliberately organised into small standalone files so these can be tested without the internet or the database. **No automated tests exist in this build.** |
-| **End-to-end testing (Playwright)** | Upcoming phase — not started | Automated scripts driving a real browser through the main journeys (import a CSV → categorize → check the dashboard) so they can be re-run on every change. |
+| **API testing (Postman)** | Done — see TEST-CASES.md | Calling the endpoints directly, bypassing the web page, to check that the server rejects bad data on its own rather than relying on the browser form to stop it. This matters because the browser's checks and the server's checks are written separately and can disagree. Run by hand via Postman/curl against every BB case in TEST-CASES.md (BB-1, BB-2, BB-4, BB-5, BB-6, BB-7, BB-8) — done as practice with the tool rather than as a saved, reusable collection; no `.postman_collection.json` exists in this repo. |
+| **Unit & integration testing (Vitest)** | Done — 39 tests passing, plus a new auth suite | Automated tests of the calculation logic in isolation: money maths, CSV date/amount parsing, merchant name normalisation, AI response parsing, and the anomaly boundary rules. The code was deliberately organised into small standalone files so these can be tested without the internet or the database (the anomaly rules were pulled out of `recomputeFlags()` for the same reason). **39 tests** exist across `money.ts`, `csv.ts`, `normalize.ts`, `gemini.ts`, and `anomaly.ts` — see README.md's Testing section for the exact breakdown. On top of those, `server/src/__tests__/auth.unit.test.ts` covers password hashing, token generation, and email validation as pure functions, and `auth.integration.test.ts` spins up the real Express app (via `supertest`, against a throwaway in-memory database — see `DATABASE_PATH`) to exercise signup, login, logout, session checks, per-user data isolation, the legacy-data claim, and the full forgot/reset-password flow end to end. Three things are still untested: the CSV debit/credit two-column mode, duplicate-row detection, and the AI's invalid-category-to-"Other" fallback. |
+| **End-to-end testing (Playwright)** | Auth flow done; broader coverage ongoing | Automated scripts driving a real browser through the main journeys. `e2e/tests/auth.spec.ts` covers signup → empty dashboard → add data → log out → log back in with data intact, a duplicate-email signup, a wrong password, an unauthenticated visitor, and session persistence across a refresh. Every existing ledger spec now logs in first via a shared `login()` helper (`e2e/tests/utils.ts`) against the seeded demo account, since every screen now requires a session. |
 | **Accessibility testing (axe / Lighthouse)** | Upcoming phase — not started | Automated checks for colour contrast, keyboard-only navigation, screen-reader labels, and focus order. |
 
 For this pass, only the first two rows apply. The other four are named here so it's clear what is *not* protecting the build today.
@@ -299,7 +309,7 @@ Add the label `bug`, plus the module it belongs to (`ledger`, `ai`, `goals`, `da
 1. `npm install` completes without errors.
 2. `npm run build` completes without errors.
 3. `npm run dev` starts both halves of the app with no errors in the Terminal.
-4. http://localhost:5173 loads and shows the Dashboard, not the "😴 The server's not answering" screen.
+4. http://localhost:5173 loads and shows the login screen (or the Dashboard, if already signed in) — not the "😴 The server's not answering" screen.
 5. A Gemini API key is configured and the yellow "no key" banner is gone (a separate deliberate no-key pass comes later).
 6. The test case list (Section 9) is written and reviewed.
 7. The database is in a known state — either freshly seeded with `npm run seed`, or freshly emptied.

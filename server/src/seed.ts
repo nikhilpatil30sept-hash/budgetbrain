@@ -1,6 +1,10 @@
 /**
- * Development seed: ~100 realistic transactions over the trailing ~5 months.
- * Run with `npm run seed` (from the repo root). Wipes existing transactions.
+ * Development seed: ~100 realistic transactions over the trailing ~5 months,
+ * for one account. Run with `npm run seed` (from the repo root), optionally
+ * with an email: `npm run seed -- someone@example.com` (defaults to
+ * demo@budgetbrain.local / password "password123", creating the account if
+ * it doesn't exist yet). Wipes and re-seeds that account's own transactions
+ * only — it never touches anyone else's data.
  *
  * Recent expenses (last ~12 days) are left Uncategorized on purpose so the
  * "Categorize" button has something to do out of the box.
@@ -8,6 +12,20 @@
 import { db } from "./db.js";
 import { addDaysISO, nowISO, todayISO } from "./lib/dates.js";
 import { recomputeFlags } from "./services/anomaly.js";
+import { createUser, findUserByEmail } from "./services/auth.js";
+
+const SEED_EMAIL = process.argv[2] ?? "demo@budgetbrain.local";
+const SEED_PASSWORD = "password123";
+
+const existingUser = findUserByEmail(SEED_EMAIL);
+const seedUser = existingUser ?? (await createUser(SEED_EMAIL, SEED_PASSWORD));
+const userId = seedUser.id;
+const justCreated = !existingUser;
+console.log(
+  justCreated
+    ? `Created account ${SEED_EMAIL} (password: "${SEED_PASSWORD}").`
+    : `Using existing account ${SEED_EMAIL}.`
+);
 
 // Deterministic RNG so reseeding produces the same data.
 function mulberry32(seed: number) {
@@ -103,23 +121,23 @@ for (const t of txs) {
 txs.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
 db.transaction(() => {
-  db.prepare("DELETE FROM transactions").run();
-  db.prepare("DELETE FROM merchant_category_cache").run();
-  db.prepare("DELETE FROM suggestions_cache").run();
-  db.prepare("UPDATE settings SET value = '520000' WHERE key = 'monthly_income_cents'").run();
+  db.prepare("DELETE FROM transactions WHERE user_id = ?").run(userId);
+  db.prepare(
+    "INSERT INTO settings (user_id, key, value) VALUES (?, 'monthly_income_cents', '520000') ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value"
+  ).run(userId);
 
   const insert = db.prepare(
-    `INSERT INTO transactions (date, description, amount_cents, category, category_source, created_at)
-     VALUES (?, ?, ?, ?, 'manual', ?)`
+    `INSERT INTO transactions (date, description, amount_cents, category, category_source, created_at, user_id)
+     VALUES (?, ?, ?, ?, 'manual', ?, ?)`
   );
   for (const t of txs) {
-    insert.run(t.date, t.description, t.amount_cents, t.category, nowISO());
+    insert.run(t.date, t.description, t.amount_cents, t.category, nowISO(), userId);
   }
 })();
 
-const { flagged_count } = recomputeFlags();
+const { flagged_count } = recomputeFlags(userId);
 const uncat = txs.filter((t) => t.category === "Uncategorized").length;
 console.log(
-  `Seeded ${txs.length} transactions (${uncat} left Uncategorized for the AI demo), ` +
+  `Seeded ${txs.length} transactions for ${SEED_EMAIL} (${uncat} left Uncategorized for the AI demo), ` +
     `monthly income set to $5,200.00, ${flagged_count} transaction(s) flagged.`
 );

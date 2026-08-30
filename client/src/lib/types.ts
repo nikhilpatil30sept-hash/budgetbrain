@@ -68,3 +68,8 @@ export interface ImportResult {
   skipped: { row: number; reason: string }[];
   duplicates: { row: number; description: string }[];
 }
+
+export interface User {
+  id: number;
+  email: string;
+}

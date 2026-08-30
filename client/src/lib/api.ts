@@ -18,6 +18,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
+      credentials: "include",
       headers: init?.body ? { "Content-Type": "application/json" } : undefined,
       ...init,
     });

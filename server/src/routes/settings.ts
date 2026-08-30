@@ -4,21 +4,23 @@ import { settingsPutSchema, zodFieldErrors } from "../schemas.js";
 
 export const settingsRouter = Router();
 
-export function getSettings(): { monthly_income_cents: number | null; currency_symbol: string } {
-  const rows = db.prepare("SELECT key, value FROM settings").all() as {
+const DEFAULTS = { monthly_income_cents: null as number | null, currency_symbol: "$" };
+
+export function getSettings(userId: number): { monthly_income_cents: number | null; currency_symbol: string } {
+  const rows = db.prepare("SELECT key, value FROM settings WHERE user_id = ?").all(userId) as {
     key: string;
     value: string | null;
   }[];
   const map = new Map(rows.map((r) => [r.key, r.value]));
   const income = map.get("monthly_income_cents");
   return {
-    monthly_income_cents: income == null ? null : Number(income),
-    currency_symbol: map.get("currency_symbol") ?? "$",
+    monthly_income_cents: income == null ? DEFAULTS.monthly_income_cents : Number(income),
+    currency_symbol: map.get("currency_symbol") ?? DEFAULTS.currency_symbol,
   };
 }
 
-settingsRouter.get("/", (_req, res) => {
-  res.json(getSettings());
+settingsRouter.get("/", (req, res) => {
+  res.json(getSettings(req.userId!));
 });
 
 settingsRouter.put("/", (req, res) => {
@@ -27,14 +29,14 @@ settingsRouter.put("/", (req, res) => {
     return res.status(400).json({ error: "Validation failed", fields: zodFieldErrors(parsed.error) });
   }
   const upsert = db.prepare(
-    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value"
   );
   const { monthly_income_cents, currency_symbol } = parsed.data;
   if (monthly_income_cents !== undefined) {
-    upsert.run("monthly_income_cents", monthly_income_cents === null ? null : String(monthly_income_cents));
+    upsert.run(req.userId, "monthly_income_cents", monthly_income_cents === null ? null : String(monthly_income_cents));
   }
   if (currency_symbol !== undefined) {
-    upsert.run("currency_symbol", currency_symbol);
+    upsert.run(req.userId, "currency_symbol", currency_symbol);
   }
-  res.json(getSettings());
+  res.json(getSettings(req.userId!));
 });

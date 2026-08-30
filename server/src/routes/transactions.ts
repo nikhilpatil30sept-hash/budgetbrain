@@ -22,8 +22,8 @@ transactionsRouter.get("/", (req, res) => {
   }
   const { month, category, search, page, flagged } = parsed.data;
 
-  const where: string[] = [];
-  const params: Record<string, unknown> = {};
+  const where: string[] = ["user_id = @userId"];
+  const params: Record<string, unknown> = { userId: req.userId };
   if (month) {
     where.push("substr(date, 1, 7) = @month");
     params.month = month;
@@ -39,7 +39,7 @@ transactionsRouter.get("/", (req, res) => {
   if (flagged) {
     where.push("flagged = 1");
   }
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const whereSql = `WHERE ${where.join(" AND ")}`;
 
   const { total } = db
     .prepare(`SELECT COUNT(*) AS total FROM transactions ${whereSql}`)
@@ -63,8 +63,8 @@ transactionsRouter.get("/", (req, res) => {
 
 const insertStmt = () =>
   db.prepare(
-    `INSERT INTO transactions (date, description, amount_cents, category, category_source, created_at)
-     VALUES (@date, @description, @amount_cents, @category, @category_source, @created_at)`
+    `INSERT INTO transactions (date, description, amount_cents, category, category_source, created_at, user_id)
+     VALUES (@date, @description, @amount_cents, @category, @category_source, @created_at, @user_id)`
   );
 
 transactionsRouter.post("/", (req, res) => {
@@ -80,8 +80,11 @@ transactionsRouter.post("/", (req, res) => {
     category: t.category,
     category_source: "manual",
     created_at: nowISO(),
+    user_id: req.userId,
   });
-  const row = db.prepare("SELECT * FROM transactions WHERE id = ?").get(info.lastInsertRowid);
+  const row = db
+    .prepare("SELECT * FROM transactions WHERE id = ? AND user_id = ?")
+    .get(info.lastInsertRowid, req.userId);
   res.status(201).json(row);
 });
 
@@ -98,7 +101,7 @@ transactionsRouter.post("/import", (req, res) => {
   }
 
   const dupStmt = db.prepare(
-    "SELECT id, description FROM transactions WHERE date = ? AND amount_cents = ?"
+    "SELECT id, description FROM transactions WHERE date = ? AND amount_cents = ? AND user_id = ?"
   );
   const insert = insertStmt();
 
@@ -121,7 +124,10 @@ transactionsRouter.post("/import", (req, res) => {
       }
       const t = parsed.data;
       const key = merchantKey(t.description);
-      const candidates = dupStmt.all(t.date, t.amount_cents) as { id: number; description: string }[];
+      const candidates = dupStmt.all(t.date, t.amount_cents, req.userId) as {
+        id: number;
+        description: string;
+      }[];
       if (candidates.some((c) => merchantKey(c.description) === key)) {
         duplicates.push({ row: idx + 1, description: t.description });
       }
@@ -132,6 +138,7 @@ transactionsRouter.post("/import", (req, res) => {
         category: t.category,
         category_source: "manual",
         created_at: nowISO(),
+        user_id: req.userId,
       });
       imported++;
     });
@@ -143,9 +150,9 @@ transactionsRouter.post("/import", (req, res) => {
 transactionsRouter.patch("/:id", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id" });
-  const existing = db.prepare("SELECT * FROM transactions WHERE id = ?").get(id) as
-    | { description: string; category: string }
-    | undefined;
+  const existing = db
+    .prepare("SELECT * FROM transactions WHERE id = ? AND user_id = ?")
+    .get(id, req.userId) as { description: string; category: string } | undefined;
   if (!existing) return res.status(404).json({ error: "Transaction not found" });
 
   const parsed = transactionPatchSchema.safeParse(req.body);
@@ -155,7 +162,7 @@ transactionsRouter.patch("/:id", (req, res) => {
   const patch = parsed.data;
 
   const sets: string[] = [];
-  const params: Record<string, unknown> = { id };
+  const params: Record<string, unknown> = { id, userId: req.userId };
   for (const field of ["date", "description", "amount_cents", "category"] as const) {
     if (patch[field] !== undefined) {
       sets.push(`${field} = @${field}`);
@@ -176,14 +183,18 @@ transactionsRouter.patch("/:id", (req, res) => {
     }
   }
 
-  db.prepare(`UPDATE transactions SET ${sets.join(", ")} WHERE id = @id`).run(params);
-  res.json(db.prepare("SELECT * FROM transactions WHERE id = ?").get(id));
+  db.prepare(`UPDATE transactions SET ${sets.join(", ")} WHERE id = @id AND user_id = @userId`).run(
+    params
+  );
+  res.json(db.prepare("SELECT * FROM transactions WHERE id = ? AND user_id = ?").get(id, req.userId));
 });
 
 transactionsRouter.delete("/:id", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Invalid id" });
-  const info = db.prepare("DELETE FROM transactions WHERE id = ?").run(id);
+  const info = db
+    .prepare("DELETE FROM transactions WHERE id = ? AND user_id = ?")
+    .run(id, req.userId);
   if (info.changes === 0) return res.status(404).json({ error: "Transaction not found" });
   res.status(204).end();
 });
