@@ -25,6 +25,16 @@ const CLIENT_DIST = path.join(__dirname, "..", "..", "client", "dist");
 export function createApp() {
   const app = express();
 
+  // Render (and most PaaS hosts) sit behind a reverse proxy that sets
+  // X-Forwarded-For. Without this, express-rate-limit throws
+  // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on every request and can key its
+  // limits off the wrong IP. `1` = trust exactly one hop (Render's own
+  // proxy), which is correct for this deployment and doesn't open us up to
+  // client-spoofed X-Forwarded-For headers.
+  if (process.env.NODE_ENV === "production") {
+    app.set("trust proxy", 1);
+  }
+
   // Local dev only: the Vite dev server (:5173) and Express (:3001) are
   // different origins there. In production the client is served from this
   // same Express app (see the static block below), so no CORS is needed —
