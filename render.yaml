@@ -14,7 +14,7 @@ services:
     name: budgetbrain
     runtime: node
     plan: free
-    buildCommand: npm install --include=dev && npm run build
+    buildCommand: rm -rf node_modules package-lock.json && npm install --include=dev && npm run build
     startCommand: node server/dist/index.js
     healthCheckPath: /api/health
     envVars:
