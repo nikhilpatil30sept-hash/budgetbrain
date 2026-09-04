@@ -1,9 +1,12 @@
 import "dotenv/config";
 import { createApp } from "./app.js";
+import { initDb } from "./db.js";
 import { hasApiKey } from "./services/gemini.js";
 import { hasMailKey } from "./services/mailer.js";
 
 const PORT = Number(process.env.PORT || 3001);
+
+await initDb();
 const app = createApp();
 
 app.listen(PORT, () => {

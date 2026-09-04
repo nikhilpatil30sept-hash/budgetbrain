@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -11,6 +13,10 @@ import { goalsRouter } from "./routes/goals.js";
 import { aiRouter } from "./routes/ai.js";
 import { hasApiKey } from "./services/gemini.js";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// server/dist/app.js -> repo root -> client/dist
+const CLIENT_DIST = path.join(__dirname, "..", "..", "client", "dist");
+
 /**
  * Builds the Express app without starting a server. Pulled out of index.ts
  * so tests (supertest) and the real entrypoint can share one definition
@@ -19,7 +25,13 @@ import { hasApiKey } from "./services/gemini.js";
 export function createApp() {
   const app = express();
 
-  app.use(cors({ origin: "http://localhost:5173", credentials: true }));
+  // Local dev only: the Vite dev server (:5173) and Express (:3001) are
+  // different origins there. In production the client is served from this
+  // same Express app (see the static block below), so no CORS is needed —
+  // leaving it on would just be a config foot-gun (a hardcoded dev origin).
+  if (process.env.NODE_ENV !== "production") {
+    app.use(cors({ origin: "http://localhost:5173", credentials: true }));
+  }
   app.use(cookieParser());
   app.use(express.json({ limit: "2mb" })); // 1,000-row imports fit comfortably
 
@@ -45,6 +57,15 @@ export function createApp() {
   app.use("/api", requireAuth, aiRouter);
 
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
+
+  // Serves the built React app from this same origin in production, so
+  // there's no separate static host and no cross-origin cookies to worry
+  // about. The client has no client-side router today, so this wildcard
+  // fallback isn't load-bearing, but it's cheap and correct to have anyway.
+  app.use(express.static(CLIENT_DIST));
+  app.get(/^\/(?!api\/).*/, (_req, res) => {
+    res.sendFile(path.join(CLIENT_DIST, "index.html"));
+  });
 
   // Last-resort error handler: always JSON, never a stack trace to the client.
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

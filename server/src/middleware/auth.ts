@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { getUserIdForSession } from "../services/auth.js";
+import { asyncHandler } from "../lib/asyncHandler.js";
 
 export const SESSION_COOKIE = "sid";
 
@@ -13,12 +14,13 @@ declare global {
 }
 
 /** Every route mounted behind this must have a logged-in user. */
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
+export const requireAuth = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   const token = req.cookies?.[SESSION_COOKIE];
-  const userId = token ? getUserIdForSession(token) : null;
+  const userId = token ? await getUserIdForSession(token) : null;
   if (!userId) {
-    return res.status(401).json({ error: "Not logged in" });
+    res.status(401).json({ error: "Not logged in" });
+    return;
   }
   req.userId = userId;
   next();
-}
+});

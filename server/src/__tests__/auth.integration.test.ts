@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import request from "supertest";
 import { createApp } from "../app";
-import { db } from "../db";
+import { execute } from "../db";
 import { createPasswordResetToken, findUserByEmail } from "../services/auth";
 import { resetDb } from "./helpers/resetDb";
 
@@ -9,8 +9,8 @@ import { resetDb } from "./helpers/resetDb";
 // process does too (a single long-lived app instance).
 const app = createApp();
 
-beforeEach(() => {
-  resetDb();
+beforeEach(async () => {
+  await resetDb();
 });
 
 describe("POST /api/auth/signup", () => {
@@ -128,9 +128,10 @@ describe("per-user data isolation", () => {
 
 describe("legacy data claim", () => {
   test("pre-existing (ownerless) data is attached to the very first account, not later ones", async () => {
-    db.prepare(
-      "INSERT INTO transactions (date, description, amount_cents, created_at) VALUES (?, ?, ?, ?)"
-    ).run("2026-01-01", "Legacy grocery run", -5000, new Date().toISOString());
+    await execute(
+      "INSERT INTO transactions (date, description, amount_cents, created_at) VALUES (?, ?, ?, ?)",
+      ["2026-01-01", "Legacy grocery run", -5000, new Date().toISOString()]
+    );
 
     const first = request.agent(app);
     await first.post("/api/auth/signup").send({ email: "first@example.com", password: "correcthorse" });
@@ -163,8 +164,8 @@ describe("forgot / reset password", () => {
     await request(app)
       .post("/api/auth/signup")
       .send({ email: "resetflow@example.com", password: "originalpw1" });
-    const user = findUserByEmail("resetflow@example.com")!;
-    const token = createPasswordResetToken(user.id);
+    const user = (await findUserByEmail("resetflow@example.com"))!;
+    const token = await createPasswordResetToken(user.id);
 
     const reset = await request(app).post("/api/auth/reset-password").send({ token, password: "brandnewpw1" });
     expect(reset.status).toBe(200);
@@ -192,8 +193,8 @@ describe("forgot / reset password", () => {
     await request(app)
       .post("/api/auth/signup")
       .send({ email: "onceonly@example.com", password: "originalpw1" });
-    const user = findUserByEmail("onceonly@example.com")!;
-    const token = createPasswordResetToken(user.id);
+    const user = (await findUserByEmail("onceonly@example.com"))!;
+    const token = await createPasswordResetToken(user.id);
 
     const first = await request(app).post("/api/auth/reset-password").send({ token, password: "newpassword1" });
     expect(first.status).toBe(200);

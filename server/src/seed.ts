@@ -9,15 +9,17 @@
  * Recent expenses (last ~12 days) are left Uncategorized on purpose so the
  * "Categorize" button has something to do out of the box.
  */
-import { db } from "./db.js";
+import { batch, initDb } from "./db.js";
 import { addDaysISO, nowISO, todayISO } from "./lib/dates.js";
 import { recomputeFlags } from "./services/anomaly.js";
 import { createUser, findUserByEmail } from "./services/auth.js";
 
+await initDb();
+
 const SEED_EMAIL = process.argv[2] ?? "demo@budgetbrain.local";
 const SEED_PASSWORD = "password123";
 
-const existingUser = findUserByEmail(SEED_EMAIL);
+const existingUser = await findUserByEmail(SEED_EMAIL);
 const seedUser = existingUser ?? (await createUser(SEED_EMAIL, SEED_PASSWORD));
 const userId = seedUser.id;
 const justCreated = !existingUser;
@@ -120,22 +122,20 @@ for (const t of txs) {
 
 txs.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
-db.transaction(() => {
-  db.prepare("DELETE FROM transactions WHERE user_id = ?").run(userId);
-  db.prepare(
-    "INSERT INTO settings (user_id, key, value) VALUES (?, 'monthly_income_cents', '520000') ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value"
-  ).run(userId);
+await batch([
+  { sql: "DELETE FROM transactions WHERE user_id = ?", args: [userId] },
+  {
+    sql: "INSERT INTO settings (user_id, key, value) VALUES (?, 'monthly_income_cents', '520000') ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+    args: [userId],
+  },
+  ...txs.map((t) => ({
+    sql: `INSERT INTO transactions (date, description, amount_cents, category, category_source, created_at, user_id)
+          VALUES (?, ?, ?, ?, 'manual', ?, ?)`,
+    args: [t.date, t.description, t.amount_cents, t.category, nowISO(), userId],
+  })),
+]);
 
-  const insert = db.prepare(
-    `INSERT INTO transactions (date, description, amount_cents, category, category_source, created_at, user_id)
-     VALUES (?, ?, ?, ?, 'manual', ?, ?)`
-  );
-  for (const t of txs) {
-    insert.run(t.date, t.description, t.amount_cents, t.category, nowISO(), userId);
-  }
-})();
-
-const { flagged_count } = recomputeFlags(userId);
+const { flagged_count } = await recomputeFlags(userId);
 const uncat = txs.filter((t) => t.category === "Uncategorized").length;
 console.log(
   `Seeded ${txs.length} transactions for ${SEED_EMAIL} (${uncat} left Uncategorized for the AI demo), ` +

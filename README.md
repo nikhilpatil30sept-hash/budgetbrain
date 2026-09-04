@@ -9,7 +9,7 @@ Local-first personal expense tracker with AI auto-categorization. Everything run
 3. **Smart Goal Tracking** — savings goals with required-weekly-savings math, spending velocity (trailing 8 weeks), on-track status, and projected completion.
 4. **Accounts** — email/password signup and login (session cookies, not JWT), forgot/reset password by email, and every other module scoped to the logged-in user.
 
-**Stack:** React 18 + Vite + TypeScript + Tailwind + Recharts · Express + TypeScript · SQLite (`better-sqlite3`) · `zod` · `papaparse` · Gemini `gemini-2.0-flash`.
+**Stack:** React 18 + Vite + TypeScript + Tailwind + Recharts · Express + TypeScript · SQLite (`@libsql/client` — a local file locally, [Turso](https://turso.tech) in production, same driver and code path either way) · `zod` · `papaparse` · Gemini `gemini-2.0-flash`.
 
 ## Setup
 
@@ -25,6 +25,8 @@ npm run seed
 
 npm run dev
 ```
+
+Leave `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` unset for local development — the app falls back to a local SQLite file (`server/data/budgetbrain.db`) automatically. Those two vars only matter once you deploy (see **Deploy** below).
 
 Open **http://localhost:5173**. The Express API runs on `http://localhost:3001`; the Vite dev server proxies `/api` to it. On first visit you'll see the login screen — sign up with any email and an 8+ character password to create your account (or log in with `demo@budgetbrain.local` / `password123` if you ran `npm run seed`).
 
@@ -44,14 +46,14 @@ _Run `npm run seed && npm run dev` and open http://localhost:5173 — screenshot
 
 ## Where things live
 
-- SQLite file: `server/data/budgetbrain.db` (gitignored; delete it to start fresh — migrations recreate it)
+- SQLite file: `server/data/budgetbrain.db` (gitignored; delete it to start fresh — migrations recreate it). Only used locally — in production the same code talks to a Turso database instead (`TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`), no code change required.
 - Gemini call log: `server/logs/gemini.log` (timestamp, batch size, outcome — never the key)
 - API key: `server/.env` only (gitignored). The frontend never sees it and never calls Gemini directly.
 
 ## Security notes
 
 - All money values are **integer cents** end-to-end (`*_cents` fields); conversion to dollars happens only at render/input time, with string/integer math — no floats.
-- All SQL goes through `better-sqlite3` prepared statements; all request bodies are validated with `zod` (400 + field-level messages).
+- All SQL goes through parameterized queries via `@libsql/client` (never string-concatenated); all request bodies are validated with `zod` (400 + field-level messages).
 - `express-rate-limit` caps the API at 300 req/min.
 - Categorization sends only description strings to Gemini; budget suggestions send only per-category monthly totals — never the raw transaction history.
 - No `dangerouslySetInnerHTML` anywhere; React escaping handles CSV cell rendering.
@@ -59,6 +61,15 @@ _Run `npm run seed && npm run dev` and open http://localhost:5173 — screenshot
 - Only a SHA-256 hash of a session or password-reset token is ever stored — a copy of the database alone can't be replayed as a valid cookie or reset link.
 - Login/signup responses never reveal whether an email has an account (same generic error for "wrong password" and "no such account"; forgot-password always returns the same message).
 - `/api/auth/*` has its own tighter rate limit (20 requests/15 min) than the general API limit, since login/signup are the most common brute-force targets.
+
+## Deploy
+
+BudgetBrain deploys as one free web service on [Render](https://render.com), with [Turso](https://turso.tech) as the persistent database (Render's free tier has no persistent disk). Express serves the built React client from the same origin as the API — no separate static host, no cross-origin cookies.
+
+1. Create a Turso database and grab its URL + token: `turso db create budgetbrain-prod`, `turso db show budgetbrain-prod --url`, `turso db tokens create budgetbrain-prod`. If you already have real local data in `server/data/budgetbrain.db` you want to keep, checkpoint and import it instead of creating an empty database: `sqlite3 server/data/budgetbrain.db "PRAGMA wal_checkpoint(TRUNCATE);"` then `turso db create budgetbrain-prod --from-file server/data/budgetbrain.db`.
+2. Push this repo to GitHub, then either apply the included `render.yaml` as a Render Blueprint, or create a Render web service manually with build command `npm ci && npm run build`, start command `node server/dist/index.js`, and health check path `/api/health`.
+3. In the Render dashboard, set `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `NODE_ENV=production`, `GEMINI_API_KEY`, `RESEND_API_KEY`, `MAIL_FROM`, and `APP_URL` (the `https://<your-service>.onrender.com` URL Render assigns — needed so password-reset emails link to the right place). Don't set `PORT` — Render injects it.
+4. Deploy. The free tier sleeps after 15 minutes idle, so the first request after a quiet period takes about a minute to wake back up — expected, not a bug.
 
 ## Design decisions / assumptions
 

@@ -1,4 +1,4 @@
-import { db } from "../db.js";
+import { execute, withTransaction } from "../db.js";
 import { addDaysISO } from "../lib/dates.js";
 import { getSettings } from "../routes/settings.js";
 
@@ -70,16 +70,16 @@ export function evaluateAnomaly(input: AnomalyCheckInput): string[] {
  * Dismissed flags stay dismissed across recomputes (flag_dismissed column —
  * assumption noted in README).
  */
-export function recomputeFlags(userId: number): { flagged_count: number } {
-  const { monthly_income_cents } = getSettings(userId);
-  const expenses = db
-    .prepare(
-      `SELECT id, date, category, amount_cents, flag_dismissed
-       FROM transactions
-       WHERE amount_cents < 0 AND category NOT IN ('Income', 'Transfers') AND user_id = ?
-       ORDER BY date ASC, id ASC`
-    )
-    .all(userId) as ExpenseRow[];
+export async function recomputeFlags(userId: number): Promise<{ flagged_count: number }> {
+  const { monthly_income_cents } = await getSettings(userId);
+  const result = await execute(
+    `SELECT id, date, category, amount_cents, flag_dismissed
+     FROM transactions
+     WHERE amount_cents < 0 AND category NOT IN ('Income', 'Transfers') AND user_id = ?
+     ORDER BY date ASC, id ASC`,
+    [userId]
+  );
+  const expenses = result.rows as unknown as ExpenseRow[];
 
   const byCategory = new Map<string, ExpenseRow[]>();
   for (const e of expenses) {
@@ -95,9 +95,7 @@ export function recomputeFlags(userId: number): { flagged_count: number } {
     const peers = byCategory.get(e.category)!;
     const windowStart = addDaysISO(e.date, -90);
     const prior = peers.filter(
-      (p) =>
-        (p.date < e.date || (p.date === e.date && p.id < e.id)) &&
-        p.date >= windowStart
+      (p) => (p.date < e.date || (p.date === e.date && p.id < e.id)) && p.date >= windowStart
     );
 
     const reasons = evaluateAnomaly({
@@ -115,14 +113,16 @@ export function recomputeFlags(userId: number): { flagged_count: number } {
     });
   }
 
-  const stmt = db.prepare("UPDATE transactions SET flagged = ?, flag_reason = ? WHERE id = ? AND user_id = ?");
   let flagged = 0;
-  db.transaction(() => {
+  await withTransaction(async (tx) => {
     for (const u of updates) {
-      stmt.run(u.flagged, u.reason, u.id, userId);
+      await tx.execute({
+        sql: "UPDATE transactions SET flagged = ?, flag_reason = ? WHERE id = ? AND user_id = ?",
+        args: [u.flagged, u.reason, u.id, userId],
+      });
       if (u.flagged) flagged++;
     }
-  })();
+  });
 
   return { flagged_count: flagged };
 }

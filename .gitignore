@@ -21,3 +21,5 @@ server/dist/
 # OS / editor noise
 .DS_Store
 *.log
+server/test-results/
+.env.save
