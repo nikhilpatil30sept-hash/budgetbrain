@@ -50,7 +50,7 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: e2e
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox
 
       # playwright.config.ts's webServer block starts `npm run dev` (both
       # server + client) itself and waits for it to be ready.
