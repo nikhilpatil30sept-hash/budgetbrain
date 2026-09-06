@@ -75,10 +75,17 @@ export default defineConfig({
     // },
   ],
 
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://localhost:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
+  /* Start the app (server + client dev servers) before the suite runs.
+   * `cwd: '..'` points npm at the repo root, so `npm run dev` there boots
+   * both workspaces via `concurrently`, matching exactly what a developer
+   * runs locally. `reuseExistingServer` lets a dev keep their own `npm run
+   * dev` running locally without Playwright fighting it for the port; CI
+   * always starts fresh. */
+  webServer: {
+    command: 'npm run dev',
+    cwd: '..',
+    url: 'http://localhost:5173',
+    reuseExistingServer: !process.env.CI,
+    timeout: 60_000,
+  },
 });

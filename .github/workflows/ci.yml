@@ -1,0 +1,66 @@
+name: CI
+
+# Runs on every push (any branch) and every pull request, so a broken
+# commit is caught before it ever reaches Render.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # Deliberately `npm install`, not `npm ci`: the committed lockfile
+      # was generated on macOS and only pins the darwin build of Rollup's
+      # optional native binary. `npm ci` refuses to deviate from that and
+      # fails on Linux runners (the same issue hit on Render); `npm install`
+      # re-resolves for the current platform. Safe here since every job
+      # gets a brand-new runner with no stale node_modules to reuse.
+      - name: Install dependencies (server + client)
+        run: npm install
+
+      - name: Build (compile check)
+        run: npm run build
+
+      - name: Run server unit tests (Vitest)
+        run: npm test
+
+      # Playwright's tests log in as this seeded demo account (see
+      # e2e/tests/utils.ts). Must run before the app starts so the account
+      # already exists when the login flow hits it.
+      - name: Seed demo account for e2e tests
+        run: npm run seed
+
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm install
+
+      - name: Install Playwright browsers
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      # playwright.config.ts's webServer block starts `npm run dev` (both
+      # server + client) itself and waits for it to be ready.
+      - name: Run end-to-end tests (Playwright)
+        working-directory: e2e
+        run: npx playwright test
+        env:
+          CI: true
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 14
