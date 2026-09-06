@@ -35,7 +35,7 @@ jobs:
       - name: Build (compile check)
         run: npm run build
 
-      - name: Run server unit tests (Vitest)
+      - name: Run unit tests (Vitest -- server + client)
         run: npm test
 
       # Playwright's tests log in as this seeded demo account (see
