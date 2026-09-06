@@ -20,14 +20,17 @@ jobs:
         with:
           node-version: "24"
 
-      # Deliberately `npm install`, not `npm ci`: the committed lockfile
-      # was generated on macOS and only pins the darwin build of Rollup's
-      # optional native binary. `npm ci` refuses to deviate from that and
-      # fails on Linux runners (the same issue hit on Render); `npm install`
-      # re-resolves for the current platform. Safe here since every job
-      # gets a brand-new runner with no stale node_modules to reuse.
+      # The committed package-lock.json was generated on macOS and only
+      # pins the darwin build of Rollup's optional native binary. Both
+      # `npm ci` AND a plain `npm install` respect that pinned resolution
+      # and fail on Linux with "Cannot find module
+      # @rollup/rollup-linux-x64-gnu" (npm/cli#4828) — confirmed by this
+      # workflow's first run. Deleting the lockfile before installing is
+      # the same fix already proven on Render: it forces npm to resolve
+      # optional deps fresh for the actual platform instead of trusting a
+      # lockfile written on a different OS.
       - name: Install dependencies (server + client)
-        run: npm install
+        run: rm -f package-lock.json && npm install
 
       - name: Build (compile check)
         run: npm run build
