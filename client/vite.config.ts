@@ -7,6 +7,14 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "html", "lcov"],
+      reportsDirectory: "./coverage",
+      // main.tsx is just ReactDOM.createRoot(...).render(<App />) -- there's
+      // nothing in it to unit test.
+      exclude: ["src/main.tsx", "**/__tests__/**", "src/test-setup.ts"],
+    },
   },
   server: {
     port: 5173,

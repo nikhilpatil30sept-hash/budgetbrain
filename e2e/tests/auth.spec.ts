@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { login, todayISO, DEMO_PASSWORD } from './utils';
+import { todayISO, DEMO_PASSWORD } from './utils';
 
 /**
  * Authentication suite. Unlike the other specs, BB-A1 deliberately creates
