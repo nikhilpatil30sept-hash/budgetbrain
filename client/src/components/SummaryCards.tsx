@@ -46,7 +46,7 @@ export function SummaryCards({
       body: summary && (
         <span>
           <AnimatedInt value={summary.flagged_count} className="text-spark-600" />
-          <span className="ml-1.5 text-sm font-bold text-ink-400">flagged</span>
+          <span className="ml-1.5 text-sm font-bold text-ink-900">flagged</span> {/* ink-900, not ink-400/600: same reasoning as App.tsx's tagline -- this card sits over a drifting translucent blob, and ink-600 alone doesn't clear 4.5:1 at the lightest point of that animation */}
         </span>
       ),
     },

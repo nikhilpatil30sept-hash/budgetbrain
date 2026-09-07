@@ -178,7 +178,14 @@ export default function App() {
           </motion.span>
           <span>
             Budget<span className="text-brand-500">Brain</span>
-            <span className="block text-[11px] font-bold leading-tight text-ink-400">
+            {/* ink-900, not the usual ink-400/600 muted tones: this sits over
+                the header's perpetually-drifting translucent color blobs
+                (see Backdrop.tsx), not a plain card surface. ink-600 still
+                only clears 4.36:1 against the lightest point the blob drifts
+                to (needs 4.5), and since the background keeps moving there's
+                no single "safe" frame to target -- ink-900 clears it with
+                real margin (8.9:1+) no matter where the blobs are. */}
+            <span className="block text-[11px] font-bold leading-tight text-ink-900">
               your money, but friendlier
             </span>
           </span>

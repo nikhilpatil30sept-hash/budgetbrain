@@ -252,6 +252,35 @@ describe("PATCH /api/transactions/:id", () => {
     const res = await alice.patch("/api/transactions/999999").send({ description: "Ghost" });
     expect(res.status).toBe(404);
   });
+
+  test("two simultaneous PATCHes touching different fields both land -- neither is silently lost", async () => {
+    const alice = await newUser("patch-concurrent@example.com");
+    const created = await alice
+      .post("/api/transactions")
+      .send({ date: "2026-01-10", description: "Original", amount_cents: -500, category: "Uncategorized" });
+    const id = created.body.id;
+
+    // Real concurrency, not simulated -- both requests fired at once. Each
+    // PATCH's SQL only SETs the field(s) it was actually given, so two
+    // requests touching disjoint fields should never be able to clobber
+    // each other regardless of which one the server happens to process
+    // first; this locks that invariant in.
+    const [descRes, catRes] = await Promise.all([
+      alice.patch(`/api/transactions/${id}`).send({ description: "Renamed concurrently" }),
+      alice.patch(`/api/transactions/${id}`).send({ category: "Groceries" }),
+    ]);
+
+    expect(descRes.status).toBe(200);
+    expect(catRes.status).toBe(200);
+
+    const final = await alice.get(`/api/transactions?search=${encodeURIComponent("Renamed")}`);
+    const row = final.body.rows[0];
+    expect(row.description).toBe("Renamed concurrently");
+    expect(row.category).toBe("Groceries");
+    // The original amount, never touched by either request, must survive
+    // both concurrent writes untouched.
+    expect(row.amount_cents).toBe(-500);
+  });
 });
 
 describe("DELETE /api/transactions/:id", () => {

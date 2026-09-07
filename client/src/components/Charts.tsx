@@ -14,7 +14,10 @@ import { categoryColor, categoryIcon } from "../lib/categories";
 import { formatCents, formatCentsCompact } from "../lib/money";
 import { EmptyState } from "./Bits";
 
-const INK_MUTED = "#9C8F86";
+// Kept in sync with tailwind.config.js's ink.400 -- recharts tick colors
+// are plain hex, not Tailwind classes, so this can't just apply the utility
+// class (darkened for WCAG AA contrast; see the config file's comment).
+const INK_MUTED = "#766960";
 const GRID = "#F3E9D9";
 const BAR_LATEST = "#FF6B35";
 const BAR_REST = "#FFC7B0";
@@ -68,13 +71,32 @@ export function CategoryPie({
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <div className="relative h-60 w-60 shrink-0">
+      {/* aria-hidden: the <ul> of categories/amounts/percentages just below
+          is a full, already-accessible text equivalent of this donut, so
+          the chart itself is purely decorative to assistive tech. Without
+          this, axe flags each pie slice (an unlabeled <path role="img">,
+          courtesy of recharts) as inaccessible. */}
+      <div className="relative h-60 w-60 shrink-0" aria-hidden="true">
         <ResponsiveContainer>
-          <PieChart>
+          {/* accessibilityLayer={false}: this whole chart is already
+              aria-hidden (see the wrapping div above) since the category
+              list next to it is the real accessible content. Without this,
+              recharts still puts its own tabIndex=0 on the pie's <g>,
+              which axe correctly flags -- a focusable element inside an
+              aria-hidden container is a keyboard trap with nothing for a
+              screen reader to announce when it lands there. */}
+          <PieChart accessibilityLayer={false}>
             <Pie
               data={slices}
               dataKey="value"
               nameKey="name"
+              // accessibilityLayer={false} above stops the chart-level
+              // keyboard-nav wiring, but Pie has its own separate
+              // rootTabIndex prop (defaults to 0) that put tabindex="0" on
+              // its <g> regardless -- that's what axe was actually still
+              // catching. -1 takes it out of tab order to match the
+              // aria-hidden container it lives in.
+              rootTabIndex={-1}
               innerRadius={62}
               outerRadius={92}
               paddingAngle={2.5}

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { authRouter } from "./routes/auth.js";
 import { requireAuth } from "./middleware/auth.js";
@@ -24,6 +25,25 @@ const CLIENT_DIST = path.join(__dirname, "..", "..", "client", "dist");
  */
 export function createApp() {
   const app = express();
+
+  // As early as possible so every response -- including error pages and
+  // static files -- gets the security headers. The only override from
+  // helmet's own (already sensible) defaults: style-src additionally
+  // allows 'unsafe-inline'. React sets a few genuinely dynamic values
+  // (category-color badges/chart bars, a hover-tilt effect) via inline
+  // `style` attributes, which helmet's stricter default would silently
+  // block in the browser -- no inline <script> exists anywhere in the
+  // built client, so script-src stays at the strict 'self' default.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+          styleSrc: ["'self'", "'unsafe-inline'"],
+        },
+      },
+    })
+  );
 
   // Render (and most PaaS hosts) sit behind a reverse proxy that sets
   // X-Forwarded-For. Without this, express-rate-limit throws

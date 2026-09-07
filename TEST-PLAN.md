@@ -162,9 +162,9 @@ To test the "no AI available" scenarios, either delete `server/.env`, or set the
 | **API testing (Postman)** | Done — see TEST-CASES.md | Calling the endpoints directly, bypassing the web page, to check that the server rejects bad data on its own rather than relying on the browser form to stop it. This matters because the browser's checks and the server's checks are written separately and can disagree. Run by hand via Postman/curl against every BB case in TEST-CASES.md (BB-1, BB-2, BB-4, BB-5, BB-6, BB-7, BB-8) — done as practice with the tool rather than as a saved, reusable collection; no `.postman_collection.json` exists in this repo. |
 | **Unit & integration testing (Vitest)** | Done — 39 tests passing, plus a new auth suite | Automated tests of the calculation logic in isolation: money maths, CSV date/amount parsing, merchant name normalisation, AI response parsing, and the anomaly boundary rules. The code was deliberately organised into small standalone files so these can be tested without the internet or the database (the anomaly rules were pulled out of `recomputeFlags()` for the same reason). **39 tests** exist across `money.ts`, `csv.ts`, `normalize.ts`, `gemini.ts`, and `anomaly.ts` — see README.md's Testing section for the exact breakdown. On top of those, `server/src/__tests__/auth.unit.test.ts` covers password hashing, token generation, and email validation as pure functions, and `auth.integration.test.ts` spins up the real Express app (via `supertest`, against a throwaway in-memory database — see `DATABASE_PATH`) to exercise signup, login, logout, session checks, per-user data isolation, the legacy-data claim, and the full forgot/reset-password flow end to end. Three things are still untested: the CSV debit/credit two-column mode, duplicate-row detection, and the AI's invalid-category-to-"Other" fallback. |
 | **End-to-end testing (Playwright)** | Auth flow done; broader coverage ongoing | Automated scripts driving a real browser through the main journeys. `e2e/tests/auth.spec.ts` covers signup → empty dashboard → add data → log out → log back in with data intact, a duplicate-email signup, a wrong password, an unauthenticated visitor, and session persistence across a refresh. Every existing ledger spec now logs in first via a shared `login()` helper (`e2e/tests/utils.ts`) against the seeded demo account, since every screen now requires a session. |
-| **Accessibility testing (axe / Lighthouse)** | Upcoming phase — not started | Automated checks for colour contrast, keyboard-only navigation, screen-reader labels, and focus order. |
+| **Accessibility testing (axe-core)** | Smoke-test in place | `e2e/tests/accessibility.spec.ts` runs `@axe-core/playwright` against the login page, the dashboard, and the transaction form, failing on any *serious* or *critical* violation. This is a floor, not a full audit — colour-contrast-in-motion (framer-motion transitions), full keyboard-only walkthroughs, and screen-reader testing with a real screen reader are still manual/exploratory work, not automated. **Known limitation:** the app's decorative background (`Backdrop.tsx`) is 4 large, bold, perpetually-drifting color blobs behind the *entire* app, and `Card` (`client/src/index.css`'s `.glass`) is a translucent `bg-white/60` surface over it. That combination means muted (`ink-400`) text near the top of any page — where the blobs concentrate — can occasionally fail WCAG AA contrast depending on exactly where the blobs happen to be drifting when the test runs. Every instance axe has caught so far (`App.tsx`'s tagline, `SummaryCards.tsx`'s "flagged" count, `CategorizePanel.tsx`'s "waiting for a label" text) has been bumped to `ink-900`, which clears it with real margin regardless of blob position — but this is a reactive, spot-by-spot fix, not a structural one, so a *new* piece of UI added near the top of a page with `ink-400` text could still trip this same failure later. A structural fix exists (lower the blobs' opacity, or make `.glass` less translucent, e.g. `bg-white/80`) but is a visual-design change judged out of scope for this checklist item. |
 
-For this pass, only the first two rows apply. The other four are named here so it's clear what is *not* protecting the build today.
+This table has fallen behind the actual state of the automated suites in several other rows too (Vitest and Playwright coverage in particular have grown well past what's described here) — worth a dedicated pass to bring the whole document current, separate from this specific addition.
 
 ---
 
@@ -302,7 +302,32 @@ Add the label `bug`, plus the module it belongs to (`ledger`, `ai`, `goals`, `da
 
 ---
 
-## 8. Entry & Exit Criteria
+## 8. Load & Concurrency Smoke Testing
+
+Not part of the automated CI suite — CI's Vitest integration tests talk to the Express `app` object directly via `supertest`, with no real port bound, so there's no live server for a load-generating tool to actually hit. This is a separate, manually-run script against a real running instance instead.
+
+**What it is:** `server/scripts/loadtest.mjs`, using [autocannon](https://github.com/mcollina/autocannon)'s programmatic API. It logs in once as the seeded demo account (reusing that session cookie for every authenticated request, the way a real browser session behaves) and then runs three short phases: the public `/api/health` endpoint (baseline, no DB), an authenticated `GET /api/transactions` (a DB read), and an authenticated `GET /api/summary` (a DB aggregation query).
+
+**How to run it:**
+
+```bash
+# Terminal 1, from the repo root — start the app
+npm run dev
+
+# Terminal 2, from the repo root — once, so the demo account exists
+npm run seed
+
+# Terminal 2 — run the load test itself
+npm run loadtest -w server
+```
+
+Optional env vars (all have sane defaults): `BASE_URL` (default `http://localhost:3001`), `CONNECTIONS` (default `10`), `DURATION` in seconds per phase (default `10`).
+
+**What a healthy result looks like:** `0` timeouts, `0` non-2xx responses, and p99 latency in the tens of milliseconds. This is a single small free-tier-shaped instance, not a production cluster — the point of running this repeatably isn't chasing a specific throughput number, it's catching a regression that makes these numbers suddenly much worse (for example, the earlier bug where a Playwright CI run's cumulative traffic could exhaust the rate limiter and start returning `429`s — the same category of problem this script would also catch against a real running instance, not just in CI).
+
+---
+
+## 9. Entry & Exit Criteria
 
 ### Entry criteria — testing starts only once all of these are true
 
@@ -311,7 +336,7 @@ Add the label `bug`, plus the module it belongs to (`ledger`, `ai`, `goals`, `da
 3. `npm run dev` starts both halves of the app with no errors in the Terminal.
 4. http://localhost:5173 loads and shows the login screen (or the Dashboard, if already signed in) — not the "😴 The server's not answering" screen.
 5. A Gemini API key is configured and the yellow "no key" banner is gone (a separate deliberate no-key pass comes later).
-6. The test case list (Section 9) is written and reviewed.
+6. The test case list (Section 10) is written and reviewed.
 7. The database is in a known state — either freshly seeded with `npm run seed`, or freshly emptied.
 
 ### Exit criteria — testing is finished when all of these are true
@@ -321,11 +346,11 @@ Add the label `bug`, plus the module it belongs to (`ledger`, `ai`, `goals`, `da
 3. Every remaining **Medium** and **Low** bug is logged as a GitHub Issue with an agreed decision to fix later or accept.
 4. All four modules (Ledger, AI Categorization, Goals, Dashboard) have been tested both **with** a working Gemini key and **without** one.
 5. Every calculation listed in Section 6.11 has been verified by hand against a calculator.
-6. The final testing summary (Section 9) is written.
+6. The final testing summary (Section 10) is written.
 
 ---
 
-## 9. Deliverables
+## 10. Deliverables
 
 1. **This test plan** (`TEST-PLAN.md`) — what will be tested, where, and what the biggest risks are.
 2. **A test case list** (`TEST-CASES.md`, to be written next) — the individual step-by-step checks, each with its steps, expected result, and a column to record Pass / Fail / Blocked.

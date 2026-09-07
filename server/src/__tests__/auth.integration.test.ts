@@ -145,6 +145,59 @@ describe("legacy data claim", () => {
     const secondList = await second.get("/api/transactions");
     expect(secondList.body.rows).toEqual([]);
   });
+
+  // Regression test for a real bug: the writes that make up a legacy-data
+  // claim (transactions, goals, and -- when there are any -- settings) used
+  // to run as separate, independently-awaited statements, not one atomic
+  // transaction. Under a race between simultaneous first signups -- or any
+  // failure partway through -- that could leave the claim split across
+  // tables (e.g. the transactions moved to the new account but the goal
+  // didn't). Wrapping them all in withTransaction (server/src/db.ts) fixed
+  // it; this locks that fix in.
+  //
+  // Only transactions and goals are seeded here: settings.user_id is
+  // NOT NULL with a foreign key to users(id), so -- unlike transactions and
+  // goals, whose user_id is nullable -- there is no way to construct an
+  // ownerless settings row against the current schema (id 0 doesn't belong
+  // to any real user, and the insert is correctly rejected by the FK
+  // constraint). claimLegacyDataIfFirstUser's settings branch runs, it just
+  // has nothing to claim, which is the correct behavior for a fresh account.
+  test("a race between simultaneous first signups still claims legacy data atomically across tables -- never split, never duplicated", async () => {
+    await execute(
+      "INSERT INTO transactions (date, description, amount_cents, created_at) VALUES (?, ?, ?, ?)",
+      ["2026-01-01", "Legacy grocery run", -5000, new Date().toISOString()]
+    );
+    await execute(
+      "INSERT INTO goals (name, target_cents, deadline, created_at) VALUES (?, ?, ?, ?)",
+      ["Legacy emergency fund", 100000, "2026-12-31", new Date().toISOString()]
+    );
+
+    // Real concurrency, not simulated -- several signups fired at once.
+    // Which one (if any) ends up being "the first" is inherently racy and
+    // not something this test controls or needs to; what the atomic
+    // transaction guarantees, and what this test actually verifies, is
+    // that however the race resolves, the claim across both tables lands
+    // together -- never split between accounts.
+    const emails = ["racer1@example.com", "racer2@example.com", "racer3@example.com"];
+    await Promise.all(
+      emails.map((email) => request(app).post("/api/auth/signup").send({ email, password: "correcthorse" }))
+    );
+
+    const txOwner = (
+      await execute("SELECT user_id FROM transactions WHERE description = ?", ["Legacy grocery run"])
+    ).rows[0] as unknown as { user_id: number | null };
+    const goalOwner = (
+      await execute("SELECT user_id FROM goals WHERE name = ?", ["Legacy emergency fund"])
+    ).rows[0] as unknown as { user_id: number | null };
+
+    if (txOwner.user_id === null) {
+      // Nobody's count-of-users check ever landed on exactly 1 -- fine, as
+      // long as it's consistently nobody, not a partial claim.
+      expect(goalOwner.user_id).toBeNull();
+    } else {
+      expect(goalOwner.user_id).toBe(txOwner.user_id);
+    }
+  });
 });
 
 describe("forgot / reset password", () => {

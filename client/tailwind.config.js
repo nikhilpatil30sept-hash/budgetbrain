@@ -15,38 +15,50 @@ export default {
       },
       colors: {
         // Warm, energetic brand — coral core with a cream world around it.
+        // 500/600/700 darkened from the original FF6B35/F04E0F/C63E0A --
+        // those failed WCAG AA contrast (2.83:1 and 3.5:1) against the
+        // white button/nav-pill text and near-white link backgrounds that
+        // use them (caught by the axe-core accessibility smoke test).
+        // Same hue, deeper so text/icons on top of them hit >=4.5:1.
         brand: {
           50: "#FFF3EE",
           100: "#FFE4D9",
           200: "#FFC7B0",
           300: "#FFA382",
           400: "#FF8557",
-          500: "#FF6B35",
-          600: "#F04E0F",
-          700: "#C63E0A",
+          500: "#C64207",
+          600: "#A63709",
+          700: "#812B07",
         },
         cream: {
           50: "#FDFAF5",
           100: "#FAF4EA",
           200: "#F3E9D9",
         },
+        // 400 darkened from #9C8F86 (3.14:1 vs white) -- too light at the
+        // small bold sizes it's used at (muted labels, percentages, dates)
+        // across ~14 files; caught by the axe-core accessibility smoke test.
         ink: {
           900: "#3B2F2A",
           600: "#6B5D55",
-          400: "#9C8F86",
+          400: "#766960",
         },
         // AI / magic accent
+        // 500 darkened from #7C5CFF (4.34:1 vs white text -- just under
+        // the 4.5:1 floor, on the "Auto-label" button).
         spark: {
           100: "#EDE7FF",
-          500: "#7C5CFF",
+          500: "#704DFF",
           600: "#6647E8",
         },
         // Friendly heads-up (flags) — warm honey, not alarm-red
+        // 700 darkened from #B87400 (3.58:1 on its own honey-50 background)
+        // -- used for anomaly-flag text/amounts/buttons.
         honey: {
           50: "#FFF8E6",
           200: "#FFE9AD",
           500: "#F5A623",
-          700: "#B87400",
+          700: "#996000",
         },
         grow: {
           50: "#EAF9EF",

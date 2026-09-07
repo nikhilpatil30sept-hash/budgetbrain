@@ -9,6 +9,7 @@
  * Recent expenses (last ~12 days) are left Uncategorized on purpose so the
  * "Categorize" button has something to do out of the box.
  */
+import "dotenv/config";
 import { batch, initDb } from "./db.js";
 import { addDaysISO, nowISO, todayISO } from "./lib/dates.js";
 import { recomputeFlags } from "./services/anomaly.js";

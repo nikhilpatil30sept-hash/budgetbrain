@@ -144,7 +144,11 @@ export function CategorizePanel({
         )}
       </AnimatePresence>
       {uncategorizedHint != null && uncategorizedHint > 0 && !running && (
-        <span className="text-sm font-bold text-ink-400">
+        // ink-900, not the usual ink-400 muted tone: this sits directly on
+        // the page (no card behind it), right where Backdrop.tsx's
+        // top-left drift blob passes through -- same reasoning as
+        // App.tsx's tagline and SummaryCards.tsx's "flagged" count.
+        <span className="text-sm font-bold text-ink-900">
           {uncategorizedHint} waiting for a label
         </span>
       )}
