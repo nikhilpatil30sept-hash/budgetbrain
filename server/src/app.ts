@@ -47,9 +47,23 @@ export function createApp() {
 
   // Cheap local rate limit (requirements 7.7). Generous enough for the UI's
   // 1s categorization-status polling.
+  //
+  // Environment-gated the same way authLimiter (routes/auth.ts) already is:
+  // a real burst of Playwright traffic -- every project x every test x every
+  // retry, all from one IP against one long-lived dev-server process -- can
+  // add up to more than 300 requests in a 60s window well before anything is
+  // actually wrong. That doesn't test this middleware, it just makes CI
+  // flaky in a way that looks like a timing bug (a 429 is rejected outright,
+  // not slow, so no client-side timeout can ever paper over it). The
+  // production number is unchanged.
   app.use(
     "/api",
-    rateLimit({ windowMs: 60_000, limit: 300, standardHeaders: true, legacyHeaders: false })
+    rateLimit({
+      windowMs: 60_000,
+      limit: process.env.NODE_ENV === "production" ? 300 : 2000,
+      standardHeaders: true,
+      legacyHeaders: false,
+    })
   );
 
   app.get("/api/health", (_req, res) => {

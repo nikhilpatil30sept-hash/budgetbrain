@@ -26,14 +26,16 @@ import { SESSION_TTL_MS } from "../lib/auth.js";
 export const authRouter = Router();
 
 // Auth endpoints are a favorite brute-force target, so they get a much
-// tighter limit than the general 300/min applied to the rest of the API.
-// A tight ceiling in production, but a much more generous one everywhere
-// else — local dev and the e2e suite both log in far more than 20 times
-// per 15 minutes just by existing (every spec logs in at least once), and
-// that has nothing to do with the abuse this limit exists to stop.
+// tighter limit than the general rate limit applied to the rest of the API
+// (see the environment-gated limiter in app.ts). A tight ceiling in
+// production, but a much more generous one everywhere else — local dev and
+// the e2e suite both log in far more than 20 times per 15 minutes just by
+// existing (every spec logs in at least once, some retry, and every browser
+// project added multiplies that further), and none of that has anything to
+// do with the abuse this limit exists to stop.
 const authLimiter = rateLimit({
   windowMs: 15 * 60_000,
-  limit: process.env.NODE_ENV === "production" ? 20 : 200,
+  limit: process.env.NODE_ENV === "production" ? 20 : 1000,
   standardHeaders: true,
   legacyHeaders: false,
 });

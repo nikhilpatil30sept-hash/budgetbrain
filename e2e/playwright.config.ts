@@ -87,5 +87,11 @@ export default defineConfig({
     url: 'http://localhost:5173',
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
+    // Forward the dev server's own stdout/stderr into the CI log. Without
+    // this, a real server-side slowdown or error during a failing test is
+    // completely invisible in the Actions log — only the client-side
+    // "button never appeared" symptom shows up, not the cause.
+    stdout: 'pipe',
+    stderr: 'pipe',
   },
 });
