@@ -52,5 +52,12 @@ export async function login(page: Page, email = DEMO_EMAIL, password = DEMO_PASS
   await page.getByLabel('Email').fill(email);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Log in' }).click();
-  await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
+
+  // Firefox intermittently takes longer than the 5s default here once the
+  // dev server has already been running other browsers' tests for a while
+  // (observed failing on different tests each time under a combined
+  // chromium+firefox run, never on a fresh Firefox-only run) — this is
+  // render/network timing variance, not a broken login, so give it more room
+  // rather than risk a false failure.
+  await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible({ timeout: 10_000 });
 }
