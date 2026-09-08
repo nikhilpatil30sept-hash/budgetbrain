@@ -1,6 +1,8 @@
 # 🧠 BudgetBrain
 
-Local-first personal expense tracker with AI auto-categorization. Everything runs on your machine — the only external call is to the free-tier Google Gemini API, and only ever from the backend.
+Personal expense tracker with AI auto-categorization. Runs locally against a SQLite file, or deployed against a hosted [Turso](https://turso.tech) database — same driver, same code path, no branching. The only outbound call is to the free-tier Google Gemini API, and only ever from the backend.
+
+[![CI](https://github.com/nikhilpatil30sept-hash/budgetbrain/actions/workflows/ci.yml/badge.svg)](https://github.com/nikhilpatil30sept-hash/budgetbrain/actions/workflows/ci.yml)
 
 **Modules**
 
@@ -43,6 +45,11 @@ _Run `npm run seed && npm run dev` and open http://localhost:5173 — screenshot
 | `npm run dev` | Starts server (:3001) and client (:5173) together |
 | `npm run seed` | Wipes and reseeds the DB with ~100 fake transactions, sets monthly income to $5,200 |
 | `npm run build` | Typechecks and builds both workspaces |
+| `npm test` | Runs the full Vitest suite — both workspaces, 169 tests |
+| `npm run test:coverage` | Same, with a coverage report (text + HTML in `<workspace>/coverage/`) |
+| `npm run lint` | ESLint across server, client and e2e |
+| `npm run loadtest -w server` | Load smoke test against a running instance (see `TEST-PLAN.md` §8) |
+| `npx playwright test` | End-to-end suite — **run from inside `e2e/`**, which is a standalone project, not a workspace |
 
 ## Where things live
 
@@ -114,16 +121,37 @@ Everything except `/api/health` and `/api/auth/*` requires a logged-in session (
 
 ## Testing
 
-Vitest coverage exists for money math, CSV amount/date parsing, merchant normalization, Gemini response parsing (including a mocked-network test of the 429/5xx retry paths), and the anomaly-flagging boundary rules — 39 tests total. The parsing/normalization logic lives in small pure modules (`client/src/lib/csv.ts`, `client/src/lib/money.ts`, `server/src/lib/normalize.ts`, `server/src/services/gemini.ts`) precisely so it can be unit-tested without touching the network or the DB; the anomaly rules were pulled out of `recomputeFlags()` into a pure `evaluateAnomaly()` in `server/src/services/anomaly.ts` for the same reason.
+Roughly 169 automated tests plus 17 end-to-end journeys, all gated by CI on every push. `TEST-PLAN.md` covers the strategy and `TEST-CASES.md` the individual manual cases; this section is the map of what runs where.
 
-**Auth tests** live alongside the rest of the server suite:
-- `server/src/__tests__/auth.unit.test.ts` — password hashing/verification, session/reset token generation, and email validation, as pure functions.
-- `server/src/__tests__/auth.integration.test.ts` — spins up the real Express app (`server/src/app.ts`) with `supertest` against a throwaway in-memory database (`DATABASE_PATH=:memory:`, set in `server/vitest.setup.ts`), and drives full signup/login/logout/session flows, per-user data isolation, the legacy-data claim, and forgot/reset-password end to end — no mocking of the app's own routes or DB layer.
-- `e2e/tests/auth.spec.ts` (Playwright) covers the same flows through the real browser UI; every other e2e spec now logs in first via the shared `login()` helper in `e2e/tests/utils.ts`, since every screen requires a session.
+| Layer | Where | Size | What it covers |
+|---|---|---|---|
+| **Unit** | `server/src/__tests__/`, `client/src/**/__tests__/` | 56 | Pure functions, no DB or network. Merchant normalization, anomaly boundary rules, password/token hashing, Gemini response parsing (network mocked), money formatting, CSV amount/date parsing. |
+| **Integration** | `server/src/__tests__/*.integration.test.ts` | 93 | Real requests through the whole Express app via `supertest` into a real DB — no port bound, no browser. Auth, transactions, goals, settings, summary maths, AI orchestration, cross-user isolation. |
+| **Component** | `client/src/**/__tests__/*.test.tsx` | 20 | React Testing Library + jsdom. Queries by visible label and accessible role, never by CSS class — so a missing label breaks the test. |
+| **End-to-end** | `e2e/tests/*.spec.ts` | 17 × 4 browsers | Playwright against Chromium, Firefox, WebKit and a Pixel 5 viewport. Auth flows, transaction entry, validation rejections, layout, persistence, accessibility. |
 
-Run `npm test -w client` and `npm test -w server` — the root `npm test` currently only runs the server workspace (see known gaps below).
+```bash
+npm test                 # all 169, both workspaces, ~12s
+npm run test:coverage    # same, plus a coverage report
+cd e2e && npx playwright test   # the browser suite, ~90s
+```
+
+**Coverage** (Vitest v8): server 86% statements / 75% branches; client 72% / 64%. Branch coverage is the figure worth watching — it asks whether *both* outcomes of each condition ran.
+
+**Design choices worth knowing:**
+
+- The parsing and rule logic lives in small pure modules (`client/src/lib/csv.ts`, `client/src/lib/money.ts`, `server/src/lib/normalize.ts`, `server/src/services/gemini.ts`) precisely so it can be unit-tested without the network or the DB. The anomaly rules were pulled out of `recomputeFlags()` into a pure `evaluateAnomaly()` in `server/src/services/anomaly.ts` for the same reason.
+- Integration tests run against an in-memory database (`DATABASE_PATH=:memory:`, set in `server/vitest.setup.ts`) and `resetDb()` wipes every table before each test, so no test can be affected by one that ran before it.
+- The e2e suite runs serially (`workers: 1`) because every spec shares one dev server and one database, and some assert on global figures — BB-1 checks the monthly total moves by exactly the amount added. Parallelising without per-test data isolation would trade a slow suite for a flaky one.
+- Rate limits are environment-gated (300/min in production, 2,000 elsewhere; `/api/auth/*` 20 per 15 min in production, 1,000 elsewhere). A full four-browser Playwright run generates enough traffic from one address to exhaust the production limits, which produced `429`s that looked exactly like flaky timing until diagnosed.
+
+**CI** (`.github/workflows/ci.yml`) runs on every push and PR, ordered cheapest-first so a compile error costs seconds rather than minutes: install → lint → `npm audit --omit=dev` → build → unit/integration with coverage → seed → Playwright across all four browsers. Coverage and Playwright reports upload as artifacts even on failure. `main` deploys to Render, so this pipeline is the last gate before production.
 
 **Known gaps, not yet covered:**
-- CSV import's debit/credit two-column mode and duplicate-row detection (`convertRows` in `client/src/lib/csv.ts`).
-- The AI response's "unknown category → mapped to Other" fallback, which lives in `parseBatchResponse` inside `server/src/services/categorizer.ts` and isn't currently exported for direct unit testing.
-- `formatCentsCompact` (`client/src/lib/money.ts`) and `autoDetectMapping` (`client/src/lib/csv.ts`).
+
+- **`convertRows` in `client/src/lib/csv.ts`** — the debit/credit two-column mode and client-side duplicate detection have no direct unit test. (Server-side duplicate flagging *is* covered, in `transactions.integration.test.ts`.)
+- **The AI's "unknown category → Other" fallback** in `parseBatchResponse` (`server/src/services/categorizer.ts`) isn't exported, so it can't be unit-tested directly.
+- **`formatCentsCompact`** and **`autoDetectMapping`** have no direct tests — `autoDetectMapping` is exercised indirectly through `ImportPage.test.tsx`.
+- **The server's empty-description rejection** is covered end-to-end but has no integration test, unlike the other validation rules.
+- **The 500-character description cap** (`schemas.ts`) is verified manually only.
+- **No mutation testing**, so nothing proves the assertions are strong rather than merely present. **No visual regression testing.** Load testing exists but is manual, not in CI.

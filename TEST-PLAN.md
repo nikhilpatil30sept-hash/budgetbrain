@@ -1,17 +1,23 @@
 # BudgetBrain — QA Test Plan
 
-**Version:** 1.0
-**Date:** 2026-08-17
-**Tested build:** `main` branch, local development build
-**Tester:** Nick (solo manual testing pass)
+**Version:** 2.0
+**Date:** 2026-09-08 (v1.0: 2026-08-17)
+**Tested build:** `main` branch — both the local development build and the deployed instance at `https://budgetbrain-m5y1.onrender.com`
+**Tester:** Nick (solo)
+
+**What changed in v2.0:** v1.0 described a local-only, single-user app with no automated tests. Since then the app has gained accounts, moved to a hosted database, been deployed, and acquired an automated suite of **169 unit/integration/component tests plus 17 end-to-end journeys run across 4 browsers**, all gated by CI. Sections 1, 3, 4, 5, 9 and 10 have been brought current; Sections 6 and 7 were already accurate.
 
 ---
 
 ## 1. Overview
 
-BudgetBrain is a personal expense tracker that runs entirely on your own computer. You type in what you spent and earned (or upload a CSV file exported from your bank), and it shows you where your money went this month with summary tiles, a colour-coded pie chart, and a six-month bar chart. It can also use Google's Gemini AI to automatically guess a category for each transaction ("TRADER JOE'S #552" → Groceries), point out unusually large purchases, suggest ways to cut spending, and track savings goals by telling you how much you need to put away each week.
+BudgetBrain is a personal expense tracker. You type in what you spent and earned (or upload a CSV file exported from your bank), and it shows you where your money went this month with summary tiles, a colour-coded pie chart, and a six-month bar chart. It can also use Google's Gemini AI to automatically guess a category for each transaction ("TRADER JOE'S #552" → Groceries), point out unusually large purchases, suggest ways to cut spending, and track savings goals by telling you how much you need to put away each week.
 
-Nothing is uploaded anywhere except short trips to the Gemini AI service, and even then only merchant names and monthly category totals are sent — never your full transaction history.
+Everyone has their own account, and each account's data is private to it.
+
+**It runs in two places, and both are in scope.** Locally it stores everything in a SQLite file on your own machine. Deployed, the identical code talks to a hosted [Turso](https://turso.tech) database instead — same driver, same code path, no branching logic, so what you test locally is what runs in production. The live instance is at `https://budgetbrain-m5y1.onrender.com`.
+
+The only data ever sent to Google is what the AI needs: merchant description strings for categorization, and per-category monthly totals for budget suggestions — never your full transaction history.
 
 ---
 
@@ -86,7 +92,7 @@ Everything below was confirmed by reading the actual code and the actual screens
 - **Server-down screen** — "😴 The server's not answering" with a Try again button.
 - **Toast notifications** for successes and errors throughout.
 - **Health check** — `GET /api/health`, which also reports whether a Gemini key is configured.
-- **Rate limiting** — the API accepts a maximum of 300 requests per minute.
+- **Rate limiting** — the API accepts a maximum of 300 requests per minute **in production**; outside production the limit is raised to 2,000/min, and the tighter `/api/auth/*` limit likewise goes from 20 per 15 minutes to 1,000. This is deliberate: a full cross-browser Playwright run generates far more traffic from one address than any real user would, and the production limits used to make CI fail with `429`s that looked exactly like flaky timing (see Section 8).
 
 #### Module 5 — Authentication
 
@@ -100,15 +106,16 @@ Everything below was confirmed by reading the actual code and the actual screens
 
 ### Out of scope
 
-- **Multi-browser testing** — testing on Chrome only; Safari, Firefox, and Edge are not covered.
-- **Mobile devices and tablets** — the layout adapts to narrow windows, but no phone or tablet testing.
-- **Load and performance testing** — no testing with tens of thousands of transactions or many simultaneous users; this is a single-user local app.
-- **Penetration and security testing** — no attempts to break in, inject SQL, or bypass the rate limit.
-- **Deployment / hosting testing** — the app only runs locally; there is no production server to test.
-- **Automated test suites** — see Section 5; no automated tests exist in this build yet.
+Six items that were out of scope in v1.0 have since moved **into** scope — multi-browser, mobile viewport, deployment, automated suites, accessibility, and load testing all now have coverage (Section 5). What remains genuinely out of scope:
+
+- **Penetration and security testing** — no attempts to break in, inject SQL, or deliberately bypass the rate limit. Security *headers* are now automatically verified (`security.test.ts`) and the app's own defences are documented in the README, but nobody has actively attacked this app.
+- **Performance at scale** — the load script in Section 8 is a smoke test against one small instance. Nothing has been tested with tens of thousands of transactions, or with many genuinely simultaneous users.
+- **Real device testing** — a Pixel 5 *viewport* runs in the automated suite, but no test has run on physical phone or tablet hardware. Emulated viewport is not the same as a real device.
 - **Gemini's answer quality** — whether "STARBUCKS" is *better* labelled Dining or Other is a judgement call, not a defect. What we test is that the app handles whatever comes back safely.
 - **The 3D savings jar's visual fidelity** — animation smoothness and graphics are cosmetic; only "does it appear and roughly track progress" is checked.
-- **Accessibility audit** — planned for a later phase (Section 5).
+- **A full accessibility audit** — the axe-core scan (Section 5) catches *serious* and *critical* automated violations only. Screen-reader testing, full keyboard-only walkthroughs, and the moderate-severity findings axe reports are all still uncovered.
+- **Visual regression testing** — nothing compares screenshots between runs, so a purely visual break would pass every automated check.
+- **Email delivery** — password-reset emails are tested up to the point of generating the link. Whether Resend actually delivers to a real inbox is not tested.
 
 ---
 
@@ -117,13 +124,18 @@ Everything below was confirmed by reading the actual code and the actual screens
 | Item | Value |
 |---|---|
 | Operating system | macOS 26.5.2 (Apple Silicon) |
-| Runtime | Node.js v22.20.0 |
-| Browser | Chrome (latest), desktop window |
+| Runtime | Node.js v22.23.2 locally; **Node 24** on the CI runners (Ubuntu) |
+| Browsers — manual | Chrome (latest), desktop window |
+| Browsers — automated | Chromium, Firefox, WebKit/Safari, and a Pixel 5 mobile viewport, all via Playwright |
 | Project location | `/Users/nick/budgetbrain` |
 | Start command | `npm install` once, then `npm run dev` from the project root |
 | App URL (what you test) | **http://localhost:5173** |
 | API URL (behind the scenes) | http://localhost:3001 — you only visit this directly for the API testing phase |
-| Database | SQLite, a single file at `server/data/budgetbrain.db`. Deleting this file resets the app to empty; it is recreated automatically on the next start. |
+| **Production URL** | **https://budgetbrain-m5y1.onrender.com** — deployed automatically from the `main` branch. Free tier, so it sleeps after 15 minutes idle and the first request afterwards takes about a minute. |
+| Database — local | SQLite, a single file at `server/data/budgetbrain.db`. Deleting this file resets the app to empty; it is recreated automatically on the next start. |
+| Database — production | Hosted [Turso](https://turso.tech) (libSQL), reached with the same `@libsql/client` driver and the same code path — set via `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`. |
+| Database — automated tests | An in-memory database per run (`DATABASE_PATH=:memory:`, set in `server/vitest.setup.ts`), wiped between every test by `resetDb()`. Never touches your real data. |
+| CI | GitHub Actions, `.github/workflows/ci.yml`, on every push and pull request to any branch. |
 | AI service | Google Gemini free tier, model `gemini-flash-latest` |
 | AI call log | `server/logs/gemini.log` — one line per AI call with a timestamp and outcome. Useful for confirming whether a call actually happened or came from the cache. The key is never written here. |
 
@@ -157,14 +169,24 @@ To test the "no AI available" scenarios, either delete `server/.env`, or set the
 
 | Type | Status | What it covers |
 |---|---|---|
-| **Manual functional testing** | **This phase — starting now** | Walking through every feature in Section 3 by hand against a written test case list, confirming each one behaves as expected. |
-| **Exploratory testing** | **This phase** | Unscripted poking around — deliberately unusual input, odd click orders, rapid clicking — aimed at the risk areas in Section 6. |
-| **API testing (Postman)** | Done — see TEST-CASES.md | Calling the endpoints directly, bypassing the web page, to check that the server rejects bad data on its own rather than relying on the browser form to stop it. This matters because the browser's checks and the server's checks are written separately and can disagree. Run by hand via Postman/curl against every BB case in TEST-CASES.md (BB-1, BB-2, BB-4, BB-5, BB-6, BB-7, BB-8) — done as practice with the tool rather than as a saved, reusable collection; no `.postman_collection.json` exists in this repo. |
-| **Unit & integration testing (Vitest)** | Done — 39 tests passing, plus a new auth suite | Automated tests of the calculation logic in isolation: money maths, CSV date/amount parsing, merchant name normalisation, AI response parsing, and the anomaly boundary rules. The code was deliberately organised into small standalone files so these can be tested without the internet or the database (the anomaly rules were pulled out of `recomputeFlags()` for the same reason). **39 tests** exist across `money.ts`, `csv.ts`, `normalize.ts`, `gemini.ts`, and `anomaly.ts` — see README.md's Testing section for the exact breakdown. On top of those, `server/src/__tests__/auth.unit.test.ts` covers password hashing, token generation, and email validation as pure functions, and `auth.integration.test.ts` spins up the real Express app (via `supertest`, against a throwaway in-memory database — see `DATABASE_PATH`) to exercise signup, login, logout, session checks, per-user data isolation, the legacy-data claim, and the full forgot/reset-password flow end to end. Three things are still untested: the CSV debit/credit two-column mode, duplicate-row detection, and the AI's invalid-category-to-"Other" fallback. |
-| **End-to-end testing (Playwright)** | Auth flow done; broader coverage ongoing | Automated scripts driving a real browser through the main journeys. `e2e/tests/auth.spec.ts` covers signup → empty dashboard → add data → log out → log back in with data intact, a duplicate-email signup, a wrong password, an unauthenticated visitor, and session persistence across a refresh. Every existing ledger spec now logs in first via a shared `login()` helper (`e2e/tests/utils.ts`) against the seeded demo account, since every screen now requires a session. |
-| **Accessibility testing (axe-core)** | Smoke-test in place | `e2e/tests/accessibility.spec.ts` runs `@axe-core/playwright` against the login page, the dashboard, and the transaction form, failing on any *serious* or *critical* violation. This is a floor, not a full audit — colour-contrast-in-motion (framer-motion transitions), full keyboard-only walkthroughs, and screen-reader testing with a real screen reader are still manual/exploratory work, not automated. **Known limitation:** the app's decorative background (`Backdrop.tsx`) is 4 large, bold, perpetually-drifting color blobs behind the *entire* app, and `Card` (`client/src/index.css`'s `.glass`) is a translucent `bg-white/60` surface over it. That combination means muted (`ink-400`) text near the top of any page — where the blobs concentrate — can occasionally fail WCAG AA contrast depending on exactly where the blobs happen to be drifting when the test runs. Every instance axe has caught so far (`App.tsx`'s tagline, `SummaryCards.tsx`'s "flagged" count, `CategorizePanel.tsx`'s "waiting for a label" text) has been bumped to `ink-900`, which clears it with real margin regardless of blob position — but this is a reactive, spot-by-spot fix, not a structural one, so a *new* piece of UI added near the top of a page with `ink-400` text could still trip this same failure later. A structural fix exists (lower the blobs' opacity, or make `.glass` less translucent, e.g. `bg-white/80`) but is a visual-design change judged out of scope for this checklist item. |
+| **Manual functional testing** | Done — see `TEST-CASES.md` | Walking through every feature in Section 3 by hand against a written test case list, confirming each one behaves as expected. Cases BB-1 to BB-8 were executed by hand at both the UI and API layers and their results recorded. |
+| **Exploratory testing** | Done | Unscripted poking around — deliberately unusual input, odd click orders, rapid clicking — aimed at the risk areas in Section 6. BB-4 (typed negative amount) came out of this and is recorded as an exploratory case rather than a strict pass/fail. |
+| **API testing (Postman / curl)** | Done — manual | Calling the endpoints directly, bypassing the web page, to check the server rejects bad data on its own rather than relying on the browser form. This matters because the browser's checks and the server's checks are written separately and can disagree. Done as practice with the tool; no saved `.postman_collection.json` exists — the same ground is now covered repeatably by the automated integration suite below. |
+| **Unit testing (Vitest)** | Automated — **56 tests** | Pure functions, no database and no network. Server (38): merchant-name normalization, the anomaly boundary rules, password/token hashing, and Gemini response parsing with the network mocked. Client (18): money formatting and parsing, and CSV amount/date parsing. The parsing and rule logic was deliberately extracted into small standalone modules so it could be tested this way. |
+| **Integration testing (Vitest + Supertest)** | Automated — **93 tests** | Real HTTP requests through the whole Express app — routing, security headers, rate limiting, session checks, validation — into a real database, with no port bound and no browser. Covers auth, transactions, goals, settings, the dashboard summary maths, the AI orchestration routes, and cross-user data isolation. The largest and highest-value group in the suite. |
+| **Component testing (React Testing Library + jsdom)** | Automated — **20 tests** | React components rendered and driven in a simulated DOM, queried the way a user perceives them (by visible label and accessible role, never by CSS class). Covers the transaction form's validation states, the categorization progress panel, the goal creation form and progress bar, and the CSV import UI. |
+| **End-to-end testing (Playwright)** | Automated — **17 journeys × 4 browsers = 68 runs** | Real browsers driving the real app against a real server and database. Covers signup/login/logout/session persistence (BB-A1 to BB-A5), adding a transaction and its effect on the monthly total (BB-1), four validation-rejection cases (BB-2, BB-4, BB-5, BB-6), long-description layout (BB-7), and persistence across a refresh (BB-8). Runs serially (`workers: 1`) because every spec shares one server and database — a deliberate trade of speed for correctness. |
+| **Cross-browser & responsive** | Automated | Every end-to-end journey runs on Chromium, Firefox, WebKit/Safari and a Pixel 5 viewport. Enabling these is what surfaced the rate-limiting defect described in Section 8. Real physical devices remain out of scope. |
+| **Accessibility testing (axe-core)** | Automated smoke test | `e2e/tests/accessibility.spec.ts` runs `@axe-core/playwright` against the login page, the dashboard, and the transaction form, failing on any *serious* or *critical* violation. Its first run found five genuine WCAG AA colour-contrast failures (the primary button was at 2.83:1 against a 4.5:1 requirement) and one keyboard trap in the donut chart. This is a floor, not a full audit — see the known limitation below. |
+| **Security headers (helmet)** | Automated — 4 tests | `helmet` sets the response headers that tell browsers not to sniff content types, not to allow framing, and not to advertise the server software. `server/src/__tests__/security.test.ts` asserts they genuinely arrive, including on a 404 — middleware nobody tests is middleware that can silently stop working. |
+| **Static analysis (ESLint + TypeScript)** | Automated in CI | One flat ESLint config for the whole monorepo, with Node globals for the server, browser and React-hooks rules for the client, and relaxed `any` rules inside test files. A clean `tsc` compile is a separate CI gate. Neither runs the code — they read it, which is why they run first. |
+| **Dependency vulnerability audit (`npm audit`)** | Automated in CI | Scans dependencies against the public advisory database. Scoped to production dependencies (`--omit=dev`), because the gate exists to catch what actually reaches a user — a dev-only load-testing tool's transitive advisory is not that, and a gate that fires on harmless things trains people to ignore it. |
+| **Load & concurrency (autocannon)** | Manual, documented | Not in CI. See Section 8 for the script, how to run it, and what a healthy result looks like. |
+| **Continuous integration** | Automated — GitHub Actions | Everything above except the manual and load rows runs on every push, ordered cheapest-first so a compile error costs seconds rather than minutes: install → lint → audit → build → unit and integration tests with coverage → seed → browser tests. Coverage and Playwright reports upload as build artifacts either way, so a failure can be read without reproducing it. `main` deploys to Render, so this pipeline is the last thing between a bad commit and production. |
 
-This table has fallen behind the actual state of the automated suites in several other rows too (Vitest and Playwright coverage in particular have grown well past what's described here) — worth a dedicated pass to bring the whole document current, separate from this specific addition.
+**Coverage, as measured by Vitest's v8 provider:** server **86% statements / 75% branches**, client **72% statements / 64% branches**. Branch coverage is the more honest figure — it asks whether both outcomes of each decision were exercised, not merely whether a line was reached. Coverage proves code *ran*; it never proves the assertions were meaningful.
+
+**Known limitation — accessibility:** the app's decorative background (`Backdrop.tsx`) is four large, perpetually-drifting colour blobs behind the *entire* app, and `Card` (`.glass` in `client/src/index.css`) is a translucent `bg-white/60` surface over it. Muted (`ink-400`) text near the top of any page can therefore pass or fail contrast depending on exactly where the blobs are drifting when the scan runs. Every instance axe has caught (`App.tsx`'s tagline, `SummaryCards.tsx`'s "flagged" count, `CategorizePanel.tsx`'s "waiting for a label") was raised to `ink-900`, which clears the threshold with real margin regardless of blob position — but that is a reactive, spot-by-spot fix, so newly added UI near the top of a page could trip the same failure again. A structural fix exists (lower the blob opacity, or make `.glass` less translucent) but is a visual-design change judged out of scope.
 
 ---
 
@@ -333,26 +355,34 @@ Optional env vars (all have sane defaults): `BASE_URL` (default `http://localhos
 
 1. `npm install` completes without errors.
 2. `npm run build` completes without errors.
-3. `npm run dev` starts both halves of the app with no errors in the Terminal.
-4. http://localhost:5173 loads and shows the login screen (or the Dashboard, if already signed in) — not the "😴 The server's not answering" screen.
-5. A Gemini API key is configured and the yellow "no key" banner is gone (a separate deliberate no-key pass comes later).
-6. The test case list (Section 10) is written and reviewed.
-7. The database is in a known state — either freshly seeded with `npm run seed`, or freshly emptied.
+3. **`npm test` passes** — all 169 unit, integration and component tests green.
+4. **`npm run lint` reports no errors.**
+5. **The CI pipeline is green on the branch under test.** Since `main` deploys automatically, a red pipeline means nothing is ready to test.
+6. `npm run dev` starts both halves of the app with no errors in the Terminal.
+7. http://localhost:5173 loads and shows the login screen (or the Dashboard, if already signed in) — not the "😴 The server's not answering" screen.
+8. A Gemini API key is configured and the yellow "no key" banner is gone (a separate deliberate no-key pass comes later).
+9. The test case list (`TEST-CASES.md`) is written and reviewed.
+10. The database is in a known state — either freshly seeded with `npm run seed`, or freshly emptied.
 
 ### Exit criteria — testing is finished when all of these are true
 
-1. Every test case in the test case list has been run and marked Pass, Fail, or Blocked.
+1. Every test case in `TEST-CASES.md` has been run and marked Pass, Fail, or Blocked.
 2. Every **Critical** and **High** severity bug is fixed and re-tested as passing.
-3. Every remaining **Medium** and **Low** bug is logged as a GitHub Issue with an agreed decision to fix later or accept.
-4. All four modules (Ledger, AI Categorization, Goals, Dashboard) have been tested both **with** a working Gemini key and **without** one.
-5. Every calculation listed in Section 6.11 has been verified by hand against a calculator.
-6. The final testing summary (Section 10) is written.
+3. **Every fixed bug has left behind an automated regression test**, so it cannot silently return. (Applied so far to the legacy-data concurrency bug, the long-description layout bug, and the rate-limiting defect.)
+4. Every remaining **Medium** and **Low** bug is logged as a GitHub Issue with an agreed decision to fix later or accept.
+5. All four modules (Ledger, AI Categorization, Goals, Dashboard) have been tested both **with** a working Gemini key and **without** one.
+6. Every calculation listed in Section 6.11 has been verified by hand against a calculator.
+7. **The full automated suite passes on all four browsers**, and CI is green on the branch being released.
+8. The final testing summary (Section 10) is written.
 
 ---
 
 ## 10. Deliverables
 
-1. **This test plan** (`TEST-PLAN.md`) — what will be tested, where, and what the biggest risks are.
-2. **A test case list** (`TEST-CASES.md`, to be written next) — the individual step-by-step checks, each with its steps, expected result, and a column to record Pass / Fail / Blocked.
-3. **Logged bugs** — GitHub Issues in the format set out in Section 7, one per defect.
-4. **A final testing summary** (`TEST-SUMMARY.md`) — how many test cases were run and how many passed, a list of the bugs found grouped by severity, which areas are solid, which areas are still risky, and a plain recommendation on whether the app is ready to be deployed.
+1. ✅ **This test plan** (`TEST-PLAN.md`) — what will be tested, where, and what the biggest risks are.
+2. ✅ **A test case list** (`TEST-CASES.md`) — the individual step-by-step checks, each with its steps, expected result, the manual result recorded, and which automated suite now covers it.
+3. ✅ **An automated test suite** — 169 unit, integration and component tests plus 17 end-to-end journeys across 4 browsers, all runnable with `npm test` and `npx playwright test`, and all gated by CI on every push.
+4. ✅ **A CI pipeline** (`.github/workflows/ci.yml`) — the automated gate described in Section 5, publishing coverage and Playwright reports as build artifacts.
+5. ✅ **A load-test script** (`server/scripts/loadtest.mjs`) — documented in Section 8 so it can be re-run consistently.
+6. **Logged bugs** — GitHub Issues in the format set out in Section 7, one per defect.
+7. ⬜ **A final testing summary** (`TEST-SUMMARY.md`) — how many test cases were run and how many passed, a list of the bugs found grouped by severity, which areas are solid, which areas are still risky, and a plain recommendation on whether the app is ready to be deployed. **Not yet written.**
