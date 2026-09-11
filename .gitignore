@@ -27,3 +27,4 @@ coverage/
 *.log
 server/test-results/
 .env.save
+.spike-pdf/

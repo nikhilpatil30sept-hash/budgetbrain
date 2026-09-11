@@ -47,9 +47,14 @@ export async function callGemini(prompt: string, label: string, batchSize: numbe
       "no_key"
     );
   }
-  // gemini-flash-latest tracks the current free-tier flash model. gemini-2.0-flash
-  // was moved off the free tier (free-tier request limit is now 0), so it 429s.
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  // gemini-flash-latest started returning sustained 503s ("high demand") in
+  // Sept 2026 — Google had moved the model generation on to gemini-3.x and
+  // the "latest" alias was left pointing at an overloaded/legacy target.
+  // gemini-3.5-flash-lite is confirmed working as of the same date, including
+  // for large prompts; gemini-2.0-flash was moved off the free tier earlier
+  // (free-tier request limit is now 0), so it 429s. If this breaks again,
+  // check https://ai.google.dev/gemini-api/docs/models for current names.
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   let res: Response;
