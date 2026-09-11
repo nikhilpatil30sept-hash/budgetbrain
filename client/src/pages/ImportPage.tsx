@@ -6,6 +6,9 @@ import {
   autoDetectMapping,
   convertRows,
   needsDateFormatChoice,
+  needsStatementYear,
+  parseAmountCell,
+  suggestStatementYear,
   type ColumnMapping,
   type DateFormat,
   type RowError,
@@ -17,6 +20,29 @@ import { Reveal } from "../components/Reveal";
 import { useToast } from "../components/Toast";
 
 const MAX_ROWS = 1000;
+
+/**
+ * Turn per-row skip reasons into one honest sentence. The old message blamed
+ * the column mapping for every failure, which sent you checking the one thing
+ * that was usually fine — the app already knows the real reason, so say it.
+ * Reasons are grouped with their quoted values blanked, so nine rows failing
+ * on "Jul 22", "Jul 23", "Jul 24"… count as one reason, not three.
+ */
+function describeSkips(errors: RowError[]): string {
+  if (errors.length === 0) return "Nothing imported — no usable rows found.";
+  const groups = new Map<string, { n: number; example: string }>();
+  for (const e of errors) {
+    const key = e.reason.replace(/"[^"]*"/g, '"…"');
+    const hit = groups.get(key);
+    if (hit) hit.n++;
+    else groups.set(key, { n: 1, example: e.reason });
+  }
+  const top = [...groups.values()].sort((a, b) => b.n - a.n)[0];
+  const rest = errors.length - top.n;
+  const tail = rest > 0 ? ` (and ${rest} more for other reasons)` : "";
+  const count = errors.length === 1 ? "the 1 row was" : `all ${errors.length} rows were`;
+  return `Nothing imported — ${count} skipped: ${top.example}${tail}`;
+}
 
 interface Summary {
   imported: number;
@@ -39,6 +65,9 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
   const [mapping, setMapping] = useState<ColumnMapping | null>(null);
   const [importing, setImporting] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
+  // Which dateSamples we already offered a suggested year for — lets us
+  // offer it once per file/column without re-filling an explicit clear.
+  const suggestedYearFor = useRef<string | null>(null);
 
   function parseText(text: string) {
     setSummary(null);
@@ -69,6 +98,7 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
       dateFormat: "auto",
       expensesArePositive: false,
     });
+    suggestedYearFor.current = null;
   }
 
   function handleFile(file: File) {
@@ -84,6 +114,42 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
     [rows, mapping]
   );
   const ambiguousDates = useMemo(() => needsDateFormatChoice(dateSamples), [dateSamples]);
+  const yearlessDates = useMemo(() => needsStatementYear(dateSamples), [dateSamples]);
+  const yearOptions = useMemo(() => {
+    const y = new Date().getFullYear();
+    return [0, 1, 2, 3, 4, 5].map((n) => y - n);
+  }, []);
+
+  // Offer a default year once per set of yearless dates (a new file, or a
+  // different date column) — but never re-offer it after that, so explicitly
+  // clearing the field (e.g. to change your mind) sticks instead of being
+  // silently undone, which would make the "pick a year first" guard below
+  // impossible to actually trigger.
+  useEffect(() => {
+    if (!mapping || !yearlessDates) return;
+    const key = dateSamples.join("\n");
+    if (mapping.statementYear === undefined && suggestedYearFor.current !== key) {
+      suggestedYearFor.current = key;
+      setMapping({ ...mapping, statementYear: suggestStatementYear(dateSamples) });
+    }
+  }, [mapping, yearlessDates, dateSamples]);
+
+  /**
+   * Every parseable amount is positive — the shape of a card statement, where
+   * charges are listed unsigned. Without the flip-the-sign box ticked those
+   * all import as income, so warn rather than let it happen silently.
+   */
+  const allAmountsPositive = useMemo(() => {
+    if (!mapping || mapping.amountMode !== "single") return false;
+    let seen = 0;
+    for (const r of rows.slice(0, 200)) {
+      const res = parseAmountCell(String(r[mapping.amountCol] ?? ""));
+      if (res.cents === undefined) continue;
+      if (res.cents < 0) return false;
+      seen++;
+    }
+    return seen > 0;
+  }, [rows, mapping]);
 
   async function runImport() {
     if (!mapping) return;
@@ -95,12 +161,16 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
       toast("error", "Dates like 03/04/2025 could go either way — pick MM/DD or DD/MM above first.");
       return;
     }
+    if (yearlessDates && !mapping.statementYear) {
+      toast("error", 'Dates like "Jul 23" carry no year — pick the statement year above first.');
+      return;
+    }
     setImporting(true);
     try {
       const { parsed, errors } = convertRows(rows, mapping);
       if (parsed.length === 0) {
         setSummary({ imported: 0, skipped: errors, duplicates: [] });
-        toast("error", "No importable rows — double-check the column mapping.");
+        toast("error", describeSkips(errors));
         return;
       }
       const res = await api.post<ImportResult>("/api/transactions/import", {
@@ -266,6 +336,32 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
                   ))}
                 </div>
               </fieldset>
+              {yearlessDates && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-extrabold text-ink-600">
+                    Statement year{" "}
+                    <span className="text-honey-700">— these dates have no year</span>
+                  </span>
+                  <select
+                    aria-label="Statement year"
+                    value={mapping.statementYear ?? ""}
+                    onChange={(e) =>
+                      setMapping({
+                        ...mapping,
+                        statementYear: e.target.value ? Number(e.target.value) : undefined,
+                      })
+                    }
+                    className="field"
+                  >
+                    <option value="">Pick a year…</option>
+                    {yearOptions.map((y) => (
+                      <option key={y} value={y}>
+                        {y}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {mapping.amountMode === "single" && (
                 <label className="flex items-center gap-2 text-sm font-bold text-ink-600">
                   <input
@@ -278,6 +374,12 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
                 </label>
               )}
             </div>
+            {allAmountsPositive && !mapping.expensesArePositive && (
+              <p className="mt-3 rounded-2xl border-2 border-honey-200 bg-honey-50/60 px-3 py-2 text-sm font-bold text-honey-700">
+                ⚠️ Every amount in this file is positive. If it's a credit-card or spending
+                statement, tick the box above — otherwise all {rows.length} rows import as income.
+              </p>
+            )}
           </Card>
           </Reveal>
 
