@@ -136,7 +136,7 @@ Six items that were out of scope in v1.0 have since moved **into** scope — mul
 | Database — production | Hosted [Turso](https://turso.tech) (libSQL), reached with the same `@libsql/client` driver and the same code path — set via `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`. |
 | Database — automated tests | An in-memory database per run (`DATABASE_PATH=:memory:`, set in `server/vitest.setup.ts`), wiped between every test by `resetDb()`. Never touches your real data. |
 | CI | GitHub Actions, `.github/workflows/ci.yml`, on every push and pull request to any branch. |
-| AI service | Google Gemini free tier, model `gemini-flash-latest` |
+| AI service | Google Gemini free tier, model `gemini-3.5-flash-lite` (overridable via `GEMINI_MODEL`) |
 | AI call log | `server/logs/gemini.log` — one line per AI call with a timestamp and outcome. Useful for confirming whether a call actually happened or came from the cache. The key is never written here. |
 
 ### Starting the app
