@@ -147,7 +147,7 @@ export function findTransactionTableStart(text: string): number {
 }
 
 // Whole-line identity/header filter, applied before the digit-level
-// redaction below. Some banks repeat a "MR NAME – 4537 XXXX XXXX 1034"
+// redaction below. Some banks repeat a "MR JANE DOE - 1234 XXXX XXXX 5678"
 // style header on every page of the statement, not just the first — so
 // cropping from the first transaction-table header line onward isn't
 // enough, and the account number in these lines uses bank-style X
@@ -158,7 +158,7 @@ export function findTransactionTableStart(text: string): number {
 // contain a run of masked "XX" characters, so this is a safe signal.
 const IDENTITY_LINE_PATTERNS: RegExp[] = [
   /^(mr|mrs|ms|mx|dr|miss|prof)\.?\s/i, // salutation-prefixed name/header lines
-  /[Xx]{2,}/, // masked account/card numbers (e.g. "4537 XXXX XXXX 1034")
+  /[Xx]{2,}/, // masked account/card numbers (e.g. "1234 XXXX XXXX 5678")
 ];
 
 function isIdentityLine(line: string): boolean {
@@ -175,14 +175,14 @@ function isIdentityLine(line: string): boolean {
 // over-redact.
 const REDACT_PATTERNS: RegExp[] = [
   // Account/card/customer numbers, however grouped — including bank-style
-  // asterisk masks (e.g. "*****14*6583", "******1452"), not just plain
+  // asterisk masks (e.g. "*****12*3456", "******7890"), not just plain
   // digits. Deliberately does NOT allow a plain space inside the run
   // (only digits, "*" and "-"): a masked reference in a transaction line
   // sits right next to the amount that follows it with only a single
-  // space between them (e.g. "*****14*6583 330.00"), and an earlier
+  // space between them (e.g. "*****12*3456 330.00"), and an earlier
   // version of this pattern that allowed spaces greedily swallowed the
-  // amount along with it. Space-grouped numbers (e.g. "4537 XXXX XXXX
-  // 1034") are instead caught whole-line by isIdentityLine below. No \b
+  // amount along with it. Space-grouped numbers (e.g. "1234 XXXX XXXX
+  // 5678") are instead caught whole-line by isIdentityLine below. No \b
   // is used at all here — the character class itself is restrictive
   // enough to bound the match, and \b can't match next to a leading or
   // trailing "*" (a non-word char) the way it couldn't next to "(" in the

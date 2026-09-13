@@ -91,19 +91,19 @@ describe("redactIdentifiers", () => {
   test("drops a whole line repeating the cardholder's name and a masked card number", () => {
     // Some banks repeat a "MR NAME - masked card" header on every page, not
     // just the first, so it can land mid-document after the crop point.
-    // The masked number uses bank-style X placeholders ("4537 XXXX XXXX
-    // 1034"), which a plain digit-run regex never matches, so the whole
+    // The masked number uses bank-style X placeholders ("1234 XXXX XXXX
+    // 5678"), which a plain digit-run regex never matches, so the whole
     // line is dropped instead of partially redacted.
     const text = [
       "REF.# DATE DATE DETAILS AMOUNT($)",
-      "MR NIKHIL PATIL - 4537 XXXX XXXX 1034",
-      "001 Jul 18 Jul 20 LCBO/RAO #385 MISSISSAUGA ON 42.75",
+      "MR JANE DOE - 1234 XXXX XXXX 5678",
+      "001 Jul 18 Jul 20 COFFEE SHOP #385 SOMEWHERE ON 42.75",
     ].join("\n");
     const result = redactIdentifiers(text);
-    expect(result).not.toContain("NIKHIL PATIL");
-    expect(result).not.toContain("4537");
-    expect(result).not.toContain("1034");
-    expect(result).toContain("LCBO/RAO #385 MISSISSAUGA ON 42.75");
+    expect(result).not.toContain("JANE DOE");
+    expect(result).not.toContain("1234");
+    expect(result).not.toContain("5678");
+    expect(result).toContain("COFFEE SHOP #385 SOMEWHERE ON 42.75");
   });
 
   test("drops a salutation-prefixed header line even without a masked number", () => {
@@ -118,12 +118,12 @@ describe("redactIdentifiers", () => {
     // pattern needs to catch "*" alongside digits, not just plain digit
     // runs, or these partial digits leak straight through.
     expect(
-      redactIdentifiers("021 Jul 24 Jul 24 PAYMENT FROM - *****14*6583 330.00 -")
+      redactIdentifiers("021 Jul 24 Jul 24 PAYMENT FROM - *****12*3456 330.00 -")
     ).toBe("021 Jul 24 Jul 24 PAYMENT FROM - [REDACTED] 330.00 -");
 
     expect(
-      redactIdentifiers("022 Jul 24 Jul 25 FIDO Mobile ******1452 888-481-3436 ON 128.26")
-    ).toBe("022 Jul 24 Jul 25 FIDO Mobile [REDACTED] [REDACTED] ON 128.26");
+      redactIdentifiers("022 Jul 24 Jul 25 MOBILE CARRIER ******7890 888-481-3436 ON 128.26")
+    ).toBe("022 Jul 24 Jul 25 MOBILE CARRIER [REDACTED] [REDACTED] ON 128.26");
   });
 });
 
