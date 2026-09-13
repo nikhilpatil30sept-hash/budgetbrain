@@ -156,7 +156,7 @@ const REDACT_PATTERNS: RegExp[] = [
   /\b\d[\d\s-]{8,}\d\b/g, // account/card/customer numbers, however grouped
   /\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b/g, // SIN/SSN shape
   /[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}/g, // email addresses
-  /\b(?:\+?\d{1,2}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, // phone numbers
+  /(?:\+?\d{1,2}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, // phone numbers — no leading \b: it can't match right before "(" when preceded by a space (both non-word), which left the paren behind unredacted
 ];
 
 export function redactIdentifiers(text: string): string {
