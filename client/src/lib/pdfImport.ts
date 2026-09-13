@@ -174,7 +174,20 @@ function isIdentityLine(line: string): boolean {
 // dollar amounts — a false positive here would break extraction, not just
 // over-redact.
 const REDACT_PATTERNS: RegExp[] = [
-  /\b\d[\d\s-]{8,}\d\b/g, // account/card/customer numbers, however grouped
+  // Account/card/customer numbers, however grouped — including bank-style
+  // asterisk masks (e.g. "*****14*6583", "******1452"), not just plain
+  // digits. Deliberately does NOT allow a plain space inside the run
+  // (only digits, "*" and "-"): a masked reference in a transaction line
+  // sits right next to the amount that follows it with only a single
+  // space between them (e.g. "*****14*6583 330.00"), and an earlier
+  // version of this pattern that allowed spaces greedily swallowed the
+  // amount along with it. Space-grouped numbers (e.g. "4537 XXXX XXXX
+  // 1034") are instead caught whole-line by isIdentityLine below. No \b
+  // is used at all here — the character class itself is restrictive
+  // enough to bound the match, and \b can't match next to a leading or
+  // trailing "*" (a non-word char) the way it couldn't next to "(" in the
+  // phone pattern below.
+  /[\d*][\d*-]{8,}[\d*]/g,
   /\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b/g, // SIN/SSN shape
   /[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}/g, // email addresses
   /(?:\+?\d{1,2}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, // phone numbers — no leading \b: it can't match right before "(" when preceded by a space (both non-word), which left the paren behind unredacted

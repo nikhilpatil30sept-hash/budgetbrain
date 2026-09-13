@@ -110,6 +110,21 @@ describe("redactIdentifiers", () => {
     const text = "MRS JANE DOE\nJul 1 COFFEE SHOP -4.50";
     expect(redactIdentifiers(text)).toBe("Jul 1 COFFEE SHOP -4.50");
   });
+
+  test("redacts an asterisk-masked account reference inside a transaction line", () => {
+    // Some banks mask a linked account/card in a transaction description
+    // with asterisks rather than digits (e.g. a "payment from" entry
+    // showing the funding card's last few digits) — the account-number
+    // pattern needs to catch "*" alongside digits, not just plain digit
+    // runs, or these partial digits leak straight through.
+    expect(
+      redactIdentifiers("021 Jul 24 Jul 24 PAYMENT FROM - *****14*6583 330.00 -")
+    ).toBe("021 Jul 24 Jul 24 PAYMENT FROM - [REDACTED] 330.00 -");
+
+    expect(
+      redactIdentifiers("022 Jul 24 Jul 25 FIDO Mobile ******1452 888-481-3436 ON 128.26")
+    ).toBe("022 Jul 24 Jul 25 FIDO Mobile [REDACTED] [REDACTED] ON 128.26");
+  });
 });
 
 describe("prepareStatementForAI", () => {
