@@ -146,6 +146,27 @@ export function findTransactionTableStart(text: string): number {
   return -1;
 }
 
+// Whole-line identity/header filter, applied before the digit-level
+// redaction below. Some banks repeat a "MR NAME – 4537 XXXX XXXX 1034"
+// style header on every page of the statement, not just the first — so
+// cropping from the first transaction-table header line onward isn't
+// enough, and the account number in these lines uses bank-style X
+// placeholders that plain digit-run regexes don't match at all. Rather
+// than trying to regex-match a name (no fixed shape), we drop the whole
+// line whenever it looks like one of these header lines: real transaction
+// descriptions don't start with a salutation and essentially never
+// contain a run of masked "XX" characters, so this is a safe signal.
+const IDENTITY_LINE_PATTERNS: RegExp[] = [
+  /^(mr|mrs|ms|mx|dr|miss|prof)\.?\s/i, // salutation-prefixed name/header lines
+  /[Xx]{2,}/, // masked account/card numbers (e.g. "4537 XXXX XXXX 1034")
+];
+
+function isIdentityLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return IDENTITY_LINE_PATTERNS.some((re) => re.test(trimmed));
+}
+
 // Defense-in-depth redaction, applied regardless of whether the header
 // boundary was found. Deliberately conservative: only long digit runs
 // (9+) are touched, since shorter ones are common in legitimate
@@ -160,7 +181,12 @@ const REDACT_PATTERNS: RegExp[] = [
 ];
 
 export function redactIdentifiers(text: string): string {
-  let out = text;
+  const withoutIdentityLines = text
+    .split("\n")
+    .filter((line) => !isIdentityLine(line))
+    .join("\n");
+
+  let out = withoutIdentityLines;
   for (const re of REDACT_PATTERNS) {
     out = out.replace(re, "[REDACTED]");
   }

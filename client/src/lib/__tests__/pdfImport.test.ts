@@ -87,6 +87,29 @@ describe("redactIdentifiers", () => {
       "Jul 1 COFFEE SHOP -4.50"
     );
   });
+
+  test("drops a whole line repeating the cardholder's name and a masked card number", () => {
+    // Some banks repeat a "MR NAME - masked card" header on every page, not
+    // just the first, so it can land mid-document after the crop point.
+    // The masked number uses bank-style X placeholders ("4537 XXXX XXXX
+    // 1034"), which a plain digit-run regex never matches, so the whole
+    // line is dropped instead of partially redacted.
+    const text = [
+      "REF.# DATE DATE DETAILS AMOUNT($)",
+      "MR NIKHIL PATIL - 4537 XXXX XXXX 1034",
+      "001 Jul 18 Jul 20 LCBO/RAO #385 MISSISSAUGA ON 42.75",
+    ].join("\n");
+    const result = redactIdentifiers(text);
+    expect(result).not.toContain("NIKHIL PATIL");
+    expect(result).not.toContain("4537");
+    expect(result).not.toContain("1034");
+    expect(result).toContain("LCBO/RAO #385 MISSISSAUGA ON 42.75");
+  });
+
+  test("drops a salutation-prefixed header line even without a masked number", () => {
+    const text = "MRS JANE DOE\nJul 1 COFFEE SHOP -4.50";
+    expect(redactIdentifiers(text)).toBe("Jul 1 COFFEE SHOP -4.50");
+  });
 });
 
 describe("prepareStatementForAI", () => {
