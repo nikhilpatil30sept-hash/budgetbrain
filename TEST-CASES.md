@@ -3,7 +3,7 @@
 **Source:** written and manually executed by Nick against the local dev build described in [TEST-PLAN.md](TEST-PLAN.md), verified at both the UI layer (manual browser testing) and the API layer (Postman / curl, hitting the backend directly).
 **Purpose:** one record per test case — steps, expected result, and what was actually observed — used both to track manual QA coverage and as the source material for the Playwright suite in `e2e/tests/`.
 
-**Last updated:** after adding PDF statement import (BB-P1 to BB-P5), including two real bugs (BB-P3, BB-P4) found and fixed during a manual pass against a real statement.
+**Last updated:** after adding a Playwright e2e spec (`e2e/tests/pdf-import.spec.ts`) for PDF statement import, closing the browser-driven coverage gap for BB-P2 through BB-P5 (BB-P1's live-Gemini happy path stays manual-only).
 
 **Status legend**
 - *Manual result* — what happened when this case was actually run by hand, at whichever layer(s) were tested.
@@ -26,16 +26,16 @@
 | BB-A4 | Unauthenticated visitor sees the login screen, not the dashboard | Not run by hand — see note | ✅ UI — `e2e/tests/auth.spec.ts` |
 | BB-A5 | A logged-in session survives a page refresh | Not run by hand — see note | ✅ UI — `e2e/tests/auth.spec.ts` |
 | BB-P1 | PDF statement import extracts and imports a real digital statement correctly | PASS (UI + API) | ✅ API — `pdfImport.test.ts`, `ai.integration.test.ts` |
-| BB-P2 | The "what we'll send to the AI" preview crops the identity block before any network call | PASS (UI) | ✅ API — `pdfImport.test.ts` |
-| BB-P3 | A per-page repeated identity header leaks past the crop into the AI preview | FAILED → FIXED → PASS (UI + API) | ✅ API — `pdfImport.test.ts` |
-| BB-P4 | An asterisk-masked account reference inside a transaction line leaks past redaction | FAILED → FIXED → PASS (UI + API) | ✅ API — `pdfImport.test.ts` |
-| BB-P5 | A scanned/image-only PDF is rejected before any network call | PASS (UI) | Not automated — see note |
+| BB-P2 | The "what we'll send to the AI" preview crops the identity block before any network call | PASS (UI) | ✅ UI — `e2e/tests/pdf-import.spec.ts` · ✅ API — `pdfImport.test.ts` |
+| BB-P3 | A per-page repeated identity header leaks past the crop into the AI preview | FAILED → FIXED → PASS (UI + API) | ✅ UI — `e2e/tests/pdf-import.spec.ts` · ✅ API — `pdfImport.test.ts` |
+| BB-P4 | An asterisk-masked account reference inside a transaction line leaks past redaction | FAILED → FIXED → PASS (UI + API) | ✅ UI — `e2e/tests/pdf-import.spec.ts` · ✅ API — `pdfImport.test.ts` |
+| BB-P5 | A scanned/image-only PDF is rejected before any network call | PASS (UI) | ✅ UI — `e2e/tests/pdf-import.spec.ts` |
 
 *BB-3 was not included in what you gave me — left out rather than invented.*
 
 *The BB-A\* authentication cases were written directly as Playwright specs when login was added, rather than being executed by hand first. They are recorded here so the document covers the whole suite, but their "manual result" is honestly blank — they have never been run as manual test cases.*
 
-*The BB-P\* PDF import cases were run manually against a real (privacy-approved) bank statement in a linked browser, not against a fixture file, since the point was to catch exactly the kind of statement-format surprise a synthetic fixture wouldn't have. No Playwright spec exists for this feature yet — see Open gaps.*
+*The BB-P\* PDF import cases were run manually against a real (privacy-approved) bank statement in a linked browser, not against a fixture file, since the point was to catch exactly the kind of statement-format surprise a synthetic fixture wouldn't have. `e2e/tests/pdf-import.spec.ts` now covers BB-P2 through BB-P5 against two synthetic fixture PDFs built to reproduce the BB-P3/BB-P4 bug shapes; BB-P1's full extract-and-import path still requires a live Gemini call and stays manual-only — see Open gaps.*
 
 ---
 
@@ -267,7 +267,7 @@
 
 **Manual result:** PASS. No name, address, or account number from the pre-crop block appeared anywhere in the prepared text.
 
-**Automated:** ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` (`findTransactionTableStart`, `prepareStatementForAI`).
+**Automated:** ✅ UI — `e2e/tests/pdf-import.spec.ts` ("crops the identity block and redacts identifiers that survive into the transaction table"), against a synthetic fixture built to reproduce this shape. ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` (`findTransactionTableStart`, `prepareStatementForAI`).
 
 ---
 
@@ -287,7 +287,7 @@
 
 **Manual result:** FAILED → FIXED → PASS (UI). Re-uploaded the same statement after the fix and confirmed the line no longer appears anywhere in the preview.
 
-**Automated:** ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` ("drops a whole line repeating the cardholder's name and a masked card number", "drops a salutation-prefixed header line even without a masked number").
+**Automated:** ✅ UI — `e2e/tests/pdf-import.spec.ts` regression-tests this exact shape (a repeated identity line right after the table header) against the synthetic `digital-statement.pdf` fixture. ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` ("drops a whole line repeating the cardholder's name and a masked card number", "drops a salutation-prefixed header line even without a masked number").
 
 ---
 
@@ -307,7 +307,7 @@
 
 **Manual result:** FAILED → FIXED → PASS (UI + API). Re-ran the full redacted preview against the real statement after the fix and scanned it programmatically for any remaining digit/asterisk/name patterns — none found.
 
-**Automated:** ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` ("redacts an asterisk-masked account reference inside a transaction line").
+**Automated:** ✅ UI — `e2e/tests/pdf-import.spec.ts` regression-tests this exact shape (an asterisk-masked reference inside a transaction line) against the synthetic `digital-statement.pdf` fixture. ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` ("redacts an asterisk-masked account reference inside a transaction line").
 
 ---
 
@@ -321,7 +321,7 @@
 
 **Manual result:** PASS (UI). Confirmed via the browser's network log that zero requests were made after the upload — the rejection is entirely client-side, based on the extracted text being near-empty relative to page count.
 
-**Automated:** Not automated — see Open gaps.
+**Automated:** ✅ UI — `e2e/tests/pdf-import.spec.ts` ("rejects a scanned/image PDF before any network call"), using a synthetic `scanned-statement.pdf` fixture and asserting zero requests to `/api/extract-pdf` fire.
 
 ---
 
@@ -334,4 +334,4 @@ Every ledger and auth case in this document now has automated UI coverage. What 
 - **BB-7's 500-character boundary isn't automated.** The manual pass confirmed 501 characters is rejected and 480 accepted, pinning the `.max(500)` cap in `schemas.ts`. The Playwright spec covers the *layout* half of BB-7 but not the length limit, so that boundary would not be caught if the cap changed.
 - **The BB-A\* cases have no manual record.** They were written straight as automated specs. Running them by hand once would let this document report both layers for authentication the way it does for the ledger.
 - **Cross-browser results aren't recorded per case.** Every spec runs on Chromium, Firefox, WebKit and a Pixel 5 viewport, so each case is effectively verified four times — but this document doesn't note per-browser outcomes, and a case that failed on only one browser wouldn't be visible here.
-- **No Playwright spec exists for PDF import (BB-P1 to BB-P5).** They're covered at the unit/integration layer (`pdfImport.test.ts`, `ai.integration.test.ts`) and were manually run through the real UI once, but there's no automated browser-driven regression test — largely because a realistic multi-page statement fixture (with the exact kind of per-page repeated header that caused BB-P3) is awkward to construct and check into the repo. A synthetic fixture PDF covering that shape would close this gap.
+- **BB-P1's live-AI happy path is still manual-only.** `e2e/tests/pdf-import.spec.ts` now covers BB-P2 through BB-P5 with a browser-driven regression test against two synthetic fixture PDFs (verified green in CI), but it deliberately never clicks "Extract transactions with AI" — CI has no `GEMINI_API_KEY` configured, and this project has no precedent for e2e tests that call a real AI provider. The full extract → import → auto-label path with a live Gemini call is proven only by manual testing against a real statement.
