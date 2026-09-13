@@ -445,7 +445,7 @@ describe("POST /api/extract-pdf", () => {
     const res = await alice.post("/api/extract-pdf").send({ text: "Date Description Amount\nJul 23 STARBUCKS COFFEE -4.50" });
 
     expect(res.status).toBe(502);
-    expect(res.body.message).toMatch(/GEMINI_API_KEY/);
+    expect(res.body.message).toMatch(/Gemini API key missing or invalid/i);
   });
 
   test("requires a session", async () => {
