@@ -3,7 +3,7 @@
 **Source:** written and manually executed by Nick against the local dev build described in [TEST-PLAN.md](TEST-PLAN.md), verified at both the UI layer (manual browser testing) and the API layer (Postman / curl, hitting the backend directly).
 **Purpose:** one record per test case — steps, expected result, and what was actually observed — used both to track manual QA coverage and as the source material for the Playwright suite in `e2e/tests/`.
 
-**Last updated:** after the test-coverage checklist was completed — every ledger case below now has automated coverage.
+**Last updated:** after adding PDF statement import (BB-P1 to BB-P5), including two real bugs (BB-P3, BB-P4) found and fixed during a manual pass against a real statement.
 
 **Status legend**
 - *Manual result* — what happened when this case was actually run by hand, at whichever layer(s) were tested.
@@ -25,10 +25,17 @@
 | BB-A3 | Wrong password rejected without revealing whether the email exists | Not run by hand — see note | ✅ UI — `e2e/tests/auth.spec.ts` |
 | BB-A4 | Unauthenticated visitor sees the login screen, not the dashboard | Not run by hand — see note | ✅ UI — `e2e/tests/auth.spec.ts` |
 | BB-A5 | A logged-in session survives a page refresh | Not run by hand — see note | ✅ UI — `e2e/tests/auth.spec.ts` |
+| BB-P1 | PDF statement import extracts and imports a real digital statement correctly | PASS (UI + API) | ✅ API — `pdfImport.test.ts`, `ai.integration.test.ts` |
+| BB-P2 | The "what we'll send to the AI" preview crops the identity block before any network call | PASS (UI) | ✅ API — `pdfImport.test.ts` |
+| BB-P3 | A per-page repeated identity header leaks past the crop into the AI preview | FAILED → FIXED → PASS (UI + API) | ✅ API — `pdfImport.test.ts` |
+| BB-P4 | An asterisk-masked account reference inside a transaction line leaks past redaction | FAILED → FIXED → PASS (UI + API) | ✅ API — `pdfImport.test.ts` |
+| BB-P5 | A scanned/image-only PDF is rejected before any network call | PASS (UI) | Not automated — see note |
 
 *BB-3 was not included in what you gave me — left out rather than invented.*
 
 *The BB-A\* authentication cases were written directly as Playwright specs when login was added, rather than being executed by hand first. They are recorded here so the document covers the whole suite, but their "manual result" is honestly blank — they have never been run as manual test cases.*
+
+*The BB-P\* PDF import cases were run manually against a real (privacy-approved) bank statement in a linked browser, not against a fixture file, since the point was to catch exactly the kind of statement-format surprise a synthetic fixture wouldn't have. No Playwright spec exists for this feature yet — see Open gaps.*
 
 ---
 
@@ -230,12 +237,101 @@
 
 ---
 
+## BB-P1 to BB-P5 — PDF statement import
+
+**Written up after a manual pass against a real (privacy-approved) bank statement**, run through the actual UI in a linked browser rather than a synthetic fixture — the goal was specifically to catch statement-format surprises a hand-written fixture wouldn't reproduce, and it did (BB-P3, BB-P4 below).
+
+### BB-P1 — PDF statement import extracts and imports a real digital statement correctly
+
+**Pre-condition:** App running, Import tab visible, a digital (non-scanned) bank statement PDF available.
+
+- **Given** — user is on the Import tab with "🧾 PDF statement" selected
+- **When** — they upload a real multi-page statement PDF, review the redacted preview, click "Extract transactions with AI", then "Import"
+- **Then** — every transaction on the statement is extracted (111 of 111, matching an independent manual count of the same statement done in an earlier feasibility check) with correct dates, descriptions, and signed amounts, and importing reports 0 skipped
+
+**Post-condition:** all extracted rows land in the ledger with the same shape as a CSV import.
+
+**Manual result:** PASS (UI + API). Extracted count matched the known-good total exactly; amounts had the correct sign (negative for spending, positive for deposits) without needing the "expenses are positive" flip.
+
+**Automated:** ✅ API — `server/src/__tests__/ai.integration.test.ts` covers the `/api/extract-pdf` endpoint's parsing and error handling with Gemini mocked; no live-Gemini or full-import test runs in CI (that would burn API quota on every push), so this end-to-end count match is a manual-only check for now.
+
+---
+
+### BB-P2 — The "what we'll send to the AI" preview crops the identity block before any network call
+
+**Pre-condition:** Same as BB-P1.
+
+- **Given** — a statement PDF whose first page has a name/address/account-number block above the transaction table
+- **When** — the PDF is uploaded
+- **Then** — the "what we'll send to the AI" preview starts at the transaction table header, with the identity block above it entirely absent — confirmed by reading the preview's underlying text directly (not just eyeballing the visible portion) before any extraction request is made
+
+**Manual result:** PASS. No name, address, or account number from the pre-crop block appeared anywhere in the prepared text.
+
+**Automated:** ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` (`findTransactionTableStart`, `prepareStatementForAI`).
+
+---
+
+### BB-P3 — A per-page repeated identity header leaks past the crop into the AI preview
+
+**Description:** The real statement used for BB-P1 repeats a "MR NAME – masked card number" line immediately after the transaction-table header — not just once at the top of the document, but as a page-continuation header. The crop-from-first-header-line design only strips text *before* that first header line, so this repeated line survived, uncaught by either the crop or the digit-run redaction (the masked card number used bank-style `X` placeholders, not digits, which the redaction regex didn't match at all).
+
+- **Given** — a real statement with this per-page repeated header
+- **When** — it's uploaded and the "what we'll send to the AI" preview is inspected
+- **Then (expected)** — no name or account number appears anywhere in the preview
+- **Then (actual, first run)** — the line `MR [NAME] – [BIN] XXXX XXXX [last4]` appeared in full immediately after the table header, unredacted
+- **Then (after fix)** — the same line is dropped entirely; the transaction rows around it are untouched
+
+**Root cause:** the identity/header check only ran once, at the crop boundary; nothing re-checked the kept text for repeated header-shaped lines further down.
+
+**Fix:** `redactIdentifiers` now drops any whole line that looks like an identity/header line — salutation-prefixed ("MR"/"MRS"/etc.), or containing a run of 2+ masked `X`/`x` characters — before the existing digit/email/phone redaction runs. Commit `4d73e9d`.
+
+**Manual result:** FAILED → FIXED → PASS (UI). Re-uploaded the same statement after the fix and confirmed the line no longer appears anywhere in the preview.
+
+**Automated:** ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` ("drops a whole line repeating the cardholder's name and a masked card number", "drops a salutation-prefixed header line even without a masked number").
+
+---
+
+### BB-P4 — An asterisk-masked account reference inside a transaction line leaks past redaction
+
+**Description:** Found in the same manual pass, after fixing BB-P3. Several transaction lines on the real statement mask a linked account/card with asterisks rather than digits (e.g. a "payment from [funding card]" entry, or a phone-carrier bill line referencing a masked account) — a shape the digit-run redaction pattern never matched, since it only accepted digits, spaces, and dashes.
+
+- **Given** — a statement containing a transaction line with an asterisk-masked account reference (e.g. `PAYMENT FROM - *****12*3456 330.00`)
+- **When** — the redacted preview is generated
+- **Then (expected)** — the masked reference is redacted like any other account number
+- **Then (actual, first run)** — the asterisks and surrounding digits passed through untouched
+- **Then (after fix)** — the masked reference is redacted; the amount that follows it on the same line is untouched
+
+**A follow-on bug surfaced while fixing this:** an interim version of the pattern that allowed a plain space inside the matched run (to also catch space-grouped numbers) greedily matched across the space into the *following* dollar amount, corrupting it (e.g. producing `[REDACTED].00` instead of `[REDACTED] 330.00`). Space was dropped from the character class entirely — space-grouped identity numbers are already handled by the whole-line filter from BB-P3, so the digit-run pattern doesn't need to allow spaces at all.
+
+**Fix:** commit `9c261ab`.
+
+**Manual result:** FAILED → FIXED → PASS (UI + API). Re-ran the full redacted preview against the real statement after the fix and scanned it programmatically for any remaining digit/asterisk/name patterns — none found.
+
+**Automated:** ✅ API — `client/src/lib/__tests__/pdfImport.test.ts` ("redacts an asterisk-masked account reference inside a transaction line").
+
+---
+
+### BB-P5 — A scanned/image-only PDF is rejected before any network call
+
+**Pre-condition:** A PDF with no real text layer (an image or photo saved as PDF, not a digital export).
+
+- **Given** — user is on the Import tab with "🧾 PDF statement" selected
+- **When** — they upload an image-only PDF
+- **Then** — a "this looks like a scanned or image PDF" message appears immediately, no "what we'll send to the AI" preview or Extract button ever appears, and no request to `/api/extract-pdf` fires
+
+**Manual result:** PASS (UI). Confirmed via the browser's network log that zero requests were made after the upload — the rejection is entirely client-side, based on the extracted text being near-empty relative to page count.
+
+**Automated:** Not automated — see Open gaps.
+
+---
+
 ## Open gaps
 
-Every case in this document now has automated UI coverage. What remains open:
+Every ledger and auth case in this document now has automated UI coverage. What remains open:
 
 - **BB-3** wasn't in the material you gave me — flagged rather than filled in with a guess.
 - **BB-6's API layer isn't automated.** The server rejects an empty description (manually verified, 400 with `fields.description`), but no integration test asserts it. The suite covers missing amounts, zero amounts, malformed dates and future dates — this is the one validation rule tested only through the browser.
 - **BB-7's 500-character boundary isn't automated.** The manual pass confirmed 501 characters is rejected and 480 accepted, pinning the `.max(500)` cap in `schemas.ts`. The Playwright spec covers the *layout* half of BB-7 but not the length limit, so that boundary would not be caught if the cap changed.
 - **The BB-A\* cases have no manual record.** They were written straight as automated specs. Running them by hand once would let this document report both layers for authentication the way it does for the ledger.
 - **Cross-browser results aren't recorded per case.** Every spec runs on Chromium, Firefox, WebKit and a Pixel 5 viewport, so each case is effectively verified four times — but this document doesn't note per-browser outcomes, and a case that failed on only one browser wouldn't be visible here.
+- **No Playwright spec exists for PDF import (BB-P1 to BB-P5).** They're covered at the unit/integration layer (`pdfImport.test.ts`, `ai.integration.test.ts`) and were manually run through the real UI once, but there's no automated browser-driven regression test — largely because a realistic multi-page statement fixture (with the exact kind of per-page repeated header that caused BB-P3) is awkward to construct and check into the repo. A synthetic fixture PDF covering that shape would close this gap.
