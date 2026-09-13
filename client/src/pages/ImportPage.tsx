@@ -14,6 +14,7 @@ import {
   type RowError,
 } from "../lib/csv";
 import { celebrate } from "../lib/confetti";
+import { extractPdfPages, isLikelyScanned, prepareStatementForAI } from "../lib/pdfImport";
 import type { ImportResult } from "../lib/types";
 import { Card, EmptyState, Spinner } from "../components/Bits";
 import { Reveal } from "../components/Reveal";
@@ -59,6 +60,10 @@ interface Summary {
 export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean) => void }) {
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
+  const pdfFileRef = useRef<HTMLInputElement>(null);
+  const [source, setSource] = useState<"csv" | "pdf">("csv");
+  const [pdfPreview, setPdfPreview] = useState<{ text: string; headerStripped: boolean } | null>(null);
+  const [pdfBusy, setPdfBusy] = useState(false); // reading the file, or awaiting the AI extraction call
   const [rawText, setRawText] = useState("");
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [headers, setHeaders] = useState<string[]>([]);
@@ -106,6 +111,73 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
     reader.onload = () => parseText(String(reader.result ?? ""));
     reader.onerror = () => toast("error", "Couldn't read that file");
     reader.readAsText(file);
+  }
+
+  /**
+   * PDF branch (requirements: digital-only, any bank, auto-masked
+   * identifiers). Extraction + cropping + redaction all happen in the
+   * browser (client/src/lib/pdfImport.ts) — the raw PDF and the
+   * un-redacted text never leave it. The masked text is shown back to the
+   * user before anything is sent anywhere, mirroring the manual
+   * mask-then-review step from the feasibility spike.
+   */
+  async function handlePdfFile(file: File) {
+    setSummary(null);
+    setPdfPreview(null);
+    setPdfBusy(true);
+    try {
+      const pages = await extractPdfPages(file);
+      if (isLikelyScanned(pages)) {
+        toast(
+          "error",
+          "This looks like a scanned or image PDF — only digital statements with selectable text are supported. Try downloading a digital statement from your bank's website instead."
+        );
+        return;
+      }
+      setPdfPreview(prepareStatementForAI(pages.join("\n")));
+    } catch {
+      toast("error", "Couldn't read that PDF — is it a valid file?");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
+  /**
+   * Sends the already-masked text to the AI extraction endpoint and drops
+   * the result straight into the same rows/headers/mapping state the CSV
+   * path uses — everything downstream (preview, date-format choice,
+   * statement-year picker, import) is the CSV pipeline running unchanged.
+   */
+  async function extractTransactionsWithAI() {
+    if (!pdfPreview) return;
+    setPdfBusy(true);
+    try {
+      const res = await api.post<{ rows: { date: string; description: string; amount: string }[] }>(
+        "/api/extract-pdf",
+        { text: pdfPreview.text }
+      );
+      if (res.rows.length === 0) {
+        toast("error", "The AI couldn't find any transactions in that PDF.");
+        return;
+      }
+      setHeaders(["date", "description", "amount"]);
+      setRows(res.rows);
+      setMapping({
+        dateCol: "date",
+        descCol: "description",
+        amountMode: "single",
+        amountCol: "amount",
+        debitCol: "",
+        creditCol: "",
+        dateFormat: "auto",
+        expensesArePositive: false,
+      });
+      suggestedYearFor.current = null;
+    } catch (e) {
+      toast("error", e instanceof ApiError ? e.message : "Extraction failed — nothing was imported.");
+    } finally {
+      setPdfBusy(false);
+    }
   }
 
   const preview = rows.slice(0, 20);
@@ -195,7 +267,15 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
     setHeaders([]);
     setMapping(null);
     setSummary(null);
+    setPdfPreview(null);
     if (fileRef.current) fileRef.current.value = "";
+    if (pdfFileRef.current) pdfFileRef.current.value = "";
+  }
+
+  function switchSource(next: "csv" | "pdf") {
+    if (next === source) return;
+    setSource(next);
+    reset();
   }
 
   if (summary) {
@@ -205,39 +285,123 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
   return (
     <div className="space-y-4">
       <Card>
-        <h2 className="text-lg font-extrabold text-ink-900">📥 Bring in a bank CSV</h2>
-        <p className="mt-1 text-sm font-medium text-ink-600">
-          Upload or paste an export from your bank — you'll map the columns before anything is saved. Up to {MAX_ROWS}{" "}
-          rows per trip.
-        </p>
-        <label className="mt-3 block cursor-pointer rounded-blob border-[3px] border-dashed border-cream-200 bg-cream-50 p-6 text-center transition-colors hover:border-brand-300 hover:bg-brand-50">
-          <span className="text-3xl" aria-hidden>
-            🗂️
-          </span>
-          <p className="mt-1 text-sm font-extrabold text-ink-900">Click to choose a .csv file</p>
-          <p className="text-xs font-medium text-ink-400">or paste the raw text below</p>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,text/csv,text/plain"
-            onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
-            className="hidden"
-          />
-        </label>
-        <textarea
-          value={rawText}
-          onChange={(e) => setRawText(e.target.value)}
-          onBlur={() => rawText.trim() && parseText(rawText)}
-          placeholder={"Date,Description,Amount\n2026-06-01,TRADER JOE'S #552,-45.23"}
-          rows={5}
-          className="mt-3 w-full rounded-2xl border-2 border-cream-200 p-3 font-mono text-xs transition-colors focus:border-brand-300 focus:outline-none"
-        />
-        {rawText.trim() && rows.length === 0 && (
-          <button type="button" onClick={() => parseText(rawText)} className="btn-ghost mt-2">
-            Parse pasted text
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => switchSource("csv")}
+            className={source === "csv" ? "btn-primary !px-3 !py-1.5 text-xs" : "btn-ghost !px-3 !py-1.5 text-xs"}
+          >
+            📄 CSV
           </button>
+          <button
+            type="button"
+            onClick={() => switchSource("pdf")}
+            className={source === "pdf" ? "btn-primary !px-3 !py-1.5 text-xs" : "btn-ghost !px-3 !py-1.5 text-xs"}
+          >
+            🧾 PDF statement
+          </button>
+        </div>
+
+        {source === "csv" ? (
+          <>
+            <h2 className="mt-3 text-lg font-extrabold text-ink-900">📥 Bring in a bank CSV</h2>
+            <p className="mt-1 text-sm font-medium text-ink-600">
+              Upload or paste an export from your bank — you'll map the columns before anything is saved. Up to{" "}
+              {MAX_ROWS} rows per trip.
+            </p>
+            <label className="mt-3 block cursor-pointer rounded-blob border-[3px] border-dashed border-cream-200 bg-cream-50 p-6 text-center transition-colors hover:border-brand-300 hover:bg-brand-50">
+              <span className="text-3xl" aria-hidden>
+                🗂️
+              </span>
+              <p className="mt-1 text-sm font-extrabold text-ink-900">Click to choose a .csv file</p>
+              <p className="text-xs font-medium text-ink-400">or paste the raw text below</p>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".csv,text/csv,text/plain"
+                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+                className="hidden"
+              />
+            </label>
+            <textarea
+              value={rawText}
+              onChange={(e) => setRawText(e.target.value)}
+              onBlur={() => rawText.trim() && parseText(rawText)}
+              placeholder={"Date,Description,Amount\n2026-06-01,TRADER JOE'S #552,-45.23"}
+              rows={5}
+              className="mt-3 w-full rounded-2xl border-2 border-cream-200 p-3 font-mono text-xs transition-colors focus:border-brand-300 focus:outline-none"
+            />
+            {rawText.trim() && rows.length === 0 && (
+              <button type="button" onClick={() => parseText(rawText)} className="btn-ghost mt-2">
+                Parse pasted text
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            <h2 className="mt-3 text-lg font-extrabold text-ink-900">🧾 Bring in a PDF statement</h2>
+            <p className="mt-1 text-sm font-medium text-ink-600">
+              Digital statements only — the kind with real, selectable text. Scanned or photographed statements
+              aren't supported. We extract the text right here in your browser, cut out your personal details, and
+              show you exactly what would get sent to the AI before anything happens.
+            </p>
+            <label className="mt-3 block cursor-pointer rounded-blob border-[3px] border-dashed border-cream-200 bg-cream-50 p-6 text-center transition-colors hover:border-brand-300 hover:bg-brand-50">
+              <span className="text-3xl" aria-hidden>
+                🧾
+              </span>
+              <p className="mt-1 text-sm font-extrabold text-ink-900">Click to choose a .pdf file</p>
+              <input
+                ref={pdfFileRef}
+                type="file"
+                accept=".pdf,application/pdf"
+                onChange={(e) => e.target.files?.[0] && handlePdfFile(e.target.files[0])}
+                className="hidden"
+              />
+            </label>
+            {pdfBusy && !pdfPreview && <Spinner label="Reading your PDF…" />}
+          </>
         )}
       </Card>
+
+      {source === "pdf" && pdfPreview && (
+        <Reveal distance={20}>
+          <Card>
+            <h3 className="text-sm font-extrabold text-ink-900">🔒 What we'll send to the AI</h3>
+            <p className="mt-1 text-xs font-medium text-ink-400">
+              Everything above your transaction list — name, address, account number — has been left out, and any
+              long ID-shaped numbers, emails, or phone numbers still in here are blanked out too. Review it before
+              continuing.
+            </p>
+            {!pdfPreview.headerStripped && (
+              <p className="mt-2 rounded-2xl border-2 border-honey-200 bg-honey-50/60 px-3 py-2 text-sm font-bold text-honey-700">
+                ⚠️ We couldn't automatically find where your transaction list starts in this statement's layout, so
+                nothing was cropped — only the identifier redaction above ran. Look closely before continuing; don't
+                proceed if anything sensitive is still visible.
+              </p>
+            )}
+            <textarea
+              readOnly
+              value={pdfPreview.text}
+              rows={10}
+              className="mt-3 w-full rounded-2xl border-2 border-cream-200 bg-cream-50 p-3 font-mono text-xs"
+            />
+            <div className="mt-3">
+              {pdfBusy ? (
+                <Spinner label="Extracting transactions…" />
+              ) : (
+                <motion.button
+                  whileTap={{ scale: 0.96 }}
+                  type="button"
+                  onClick={extractTransactionsWithAI}
+                  className="btn-spark"
+                >
+                  ✨ Extract transactions with AI
+                </motion.button>
+              )}
+            </div>
+          </Card>
+        </Reveal>
+      )}
 
       {mapping && rows.length > 0 ? (
         <>
@@ -245,9 +409,11 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
           <Card>
             <h3 className="text-sm font-extrabold text-ink-900">🗺️ Map the columns</h3>
             <p className="mt-1 text-xs font-medium text-ink-400">
-              We took a guess from the headers — fix anything that looks off. {rows.length} data row
-              {rows.length === 1 ? "" : "s"} found.
+              {source === "csv"
+                ? `We took a guess from the headers — fix anything that looks off. ${rows.length} data row${rows.length === 1 ? "" : "s"} found.`
+                : `Columns came straight from the AI extraction. ${rows.length} transaction${rows.length === 1 ? "" : "s"} found.`}
             </p>
+            {source === "csv" && (
             <div className="mt-3 flex flex-wrap items-end gap-4">
               <label className="flex flex-col gap-1 text-xs font-extrabold text-ink-600">
                 Date column
@@ -308,6 +474,7 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
                 </>
               )}
             </div>
+            )}
 
             <div className="mt-4 flex flex-wrap items-center gap-6">
               <fieldset className={ambiguousDates ? "" : "opacity-60"}>
@@ -435,6 +602,7 @@ export function ImportPage({ onImported }: { onImported: (categorizeNow: boolean
           </Reveal>
         </>
       ) : (
+        source === "csv" &&
         !rawText.trim() && (
           <EmptyState
             icon="🏦"

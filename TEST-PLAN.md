@@ -44,6 +44,7 @@ Everything below was confirmed by reading the actual code and the actual screens
 - **Optimistic display** — a new row appears in the list instantly, and disappears again if the server rejects it.
 - **CSV import** (Import tab) — upload a `.csv` file or paste raw CSV text.
 - **Column mapping step** — the app guesses which column is the date, description, and amount from the header names, and you can override every guess before anything is saved.
+- **PDF statement import** (Import tab, "🧾 PDF statement") — upload a digital bank/credit-card statement PDF; the app extracts its text, crops out everything above the transaction table, redacts remaining identifier-shaped numbers/emails/phone numbers, shows you that masked text, then sends it to Gemini to extract `{date, description, amount}` rows — which then flow through the same mapping/preview/import screens as CSV. Scanned/image PDFs are rejected before any network call.
 - **Two amount layouts** — one single amount column (negative = spending), or separate "debit" and "credit" columns.
 - **"Expenses are positive numbers in this file" checkbox** — flips the sign for banks that export spending as positive numbers.
 - **Date format choice** — a radio button for MM/DD/YYYY vs DD/MM/YYYY that becomes mandatory when the file contains dates like `03/04/2025` that could be read either way.
@@ -54,7 +55,7 @@ Everything below was confirmed by reading the actual code and the actual screens
 - **Filters** — month picker, category dropdown, and a search box that matches text inside descriptions (search waits ~0.3s after you stop typing before running).
 - **Inline category editing** — click a category badge in the list to change it; this also teaches the app that merchant's category for next time.
 - **Delete** — the ✕ on a row, with a confirmation pop-up.
-- **API endpoints behind all of the above** — `GET/POST /api/transactions`, `POST /api/transactions/import`, `PATCH /api/transactions/:id`, `DELETE /api/transactions/:id`.
+- **API endpoints behind all of the above** — `GET/POST /api/transactions`, `POST /api/transactions/import`, `PATCH /api/transactions/:id`, `DELETE /api/transactions/:id`, `POST /api/extract-pdf`.
 
 #### Module 2 — AI Categorization & anomaly flagging
 
@@ -304,6 +305,17 @@ The server accepts 300 requests per minute. While a categorization run is going,
 - Every imported row is recorded as having been categorized "manually", even though you never chose anything — hovering a category badge on an imported row says "Labeled by: manual". Minor, but it's misleading.
 - The "waiting for a label" count next to the ✨ button counts **all** uncategorized transactions across all time, not just the selected month, so it won't match what you see in a filtered list.
 - The "Coach me" suggestions are cached per month **and** per set of numbers — adding a single transaction changes the numbers and so causes a fresh AI call, while clicking twice in a row does not. Verify against `server/logs/gemini.log`.
+
+### 6.15 PDF statement import
+
+This is the one feature where meaningful statement content — not just short strings — leaves the browser toward a third party (Gemini), so it deserves closer scrutiny than a typical feature.
+
+- **Scanned/photographed PDFs must be rejected before any network call.** The app checks for a real text layer (via `pdfjs-dist`) and refuses anything near-empty with a clear "looks like a scanned or image PDF" message. Test with an actual scan or a screenshot saved as a PDF — confirm it's rejected client-side and that no request to `/api/extract-pdf` ever fires (check the Network tab).
+- **The transaction-table boundary is a heuristic, not a guarantee.** The app looks for a header row naming the usual columns (Date/Description/Amount/etc.), falling back to a run of several date-like lines in a row. An unusual statement layout can fool this in either direction — cropping too early (losing real transactions) or not finding a boundary at all. When the boundary isn't found, the whole document is redacted in place instead of cropped, and the UI shows an explicit warning banner ("couldn't automatically find where your transaction list starts") — test with a statement whose layout doesn't match common patterns and confirm that warning actually appears, and that the identifier redaction still ran.
+- **Always review the "what we'll send to the AI" preview before trusting it.** The redaction only targets long (9+ digit) number runs, SIN/SSN shapes, emails, and phone numbers — it will not catch, say, a name embedded inside the transaction table itself (rare, but possible on some statement formats). This preview step exists precisely so a human confirms nothing sensitive slipped through; don't treat auto-redaction as infallible.
+- **Extracted dates/amounts go through the same parser as CSV.** Gemini is asked to echo dates exactly as printed rather than resolve them itself, so a PDF with yearless dates (`Jul 23`) still triggers the statement-year picker, and an ambiguous numeric date (`03/04/2025`) still triggers the MM/DD vs DD/MM radio — same rules as §6.1. Test a PDF with yearless dates and confirm the picker appears and is required, same as CSV.
+- **A statement whose masked text exceeds ~60,000 characters is rejected with a 400** asking the user to split the PDF into a smaller date range, rather than silently truncating (which would corrupt the last few transactions). Test with a very long, multi-year statement.
+- **A zero-result extraction is a visible error, not a silent no-op.** If Gemini returns no usable rows (e.g. the cropped text genuinely had no transactions), the endpoint returns a clear error rather than an empty success that would look like "nothing to import."
 
 ---
 

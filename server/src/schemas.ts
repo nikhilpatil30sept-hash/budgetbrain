@@ -41,6 +41,15 @@ export const importBodySchema = z.object({
   rows: z.array(z.unknown()).max(1000, "Imports are capped at 1,000 rows"),
 });
 
+// PDF import: the client extracts + crops + redacts statement text in the
+// browser (see client/src/lib/pdfImport.ts) and posts only that text here.
+// 60k chars comfortably covers the feasibility spike's successful ~22KB
+// real-statement run with headroom; anything larger asks the user to split
+// the PDF, same spirit as the 1,000-row CSV cap above.
+export const extractPdfBodySchema = z.object({
+  text: z.string().trim().min(20, "Not enough text to extract from").max(60000, "That statement is too large — try splitting it into smaller date ranges"),
+});
+
 export const settingsPutSchema = z
   .object({
     monthly_income_cents: cents.min(0).nullable(),

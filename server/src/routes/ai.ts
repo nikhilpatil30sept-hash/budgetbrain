@@ -7,6 +7,7 @@ import { todayISO } from "../lib/dates.js";
 import { recomputeFlags } from "../services/anomaly.js";
 import { getRunStatus, startCategorization } from "../services/categorizer.js";
 import { callGeminiWithBackoff, GeminiError, parseJsonArrayLoose } from "../services/gemini.js";
+import { extractPdfBodySchema, zodFieldErrors } from "../schemas.js";
 import { getSettings } from "./settings.js";
 
 export const aiRouter = Router();
@@ -23,6 +24,86 @@ aiRouter.post(
 aiRouter.get("/categorize/status", (req, res) => {
   res.json(getRunStatus(req.userId!));
 });
+
+/**
+ * PDF statement extraction. The client has already cropped the statement
+ * down to (roughly) the transaction table and redacted identifier-shaped
+ * text (see client/src/lib/pdfImport.ts) — this endpoint only ever sees
+ * that reduced text, never the raw PDF or the account holder's identity
+ * block. Gemini's job is narrow: echo back {date, description, amount}
+ * exactly as printed, so the result can flow through the same
+ * date/amount-parsing pipeline CSV import already uses (client/src/lib/csv.ts)
+ * instead of a second, AI-trusted date parser.
+ */
+function buildExtractionPrompt(text: string): string {
+  return [
+    "You extract transaction line-items from bank/credit-card statement text.",
+    "For each transaction, reproduce the date and description EXACTLY as printed — do not reformat, translate, or add a year that isn't there.",
+    "Resolve the amount into a signed decimal number as a string: NEGATIVE for money leaving the account (purchases, withdrawals, fees, payments), POSITIVE for money arriving (deposits, payroll, refunds, incoming transfers).",
+    "Work out the sign from the statement's own layout — separate Withdrawal/Deposit or Debit/Credit columns, or a single column that already carries a sign or a trailing indicator.",
+    "Ignore running-balance columns, subtotals, page headers/footers, and any non-transaction text.",
+    'Respond with ONLY a JSON array, no markdown fences, no commentary.',
+    'Shape: [{"date": "<as printed>", "description": "<as printed>", "amount": "<signed decimal string>"}]',
+    "",
+    "Examples:",
+    'Input line: "Jul 23  STARBUCKS COFFEE  4.50"  (Withdrawal column)  →  {"date":"Jul 23","description":"STARBUCKS COFFEE","amount":"-4.50"}',
+    'Input line: "07/25/2026  PAYROLL DEPOSIT  2,000.00"  (Deposit column)  →  {"date":"07/25/2026","description":"PAYROLL DEPOSIT","amount":"2000.00"}',
+    "",
+    "Statement text:",
+    text,
+  ].join("\n");
+}
+
+interface ExtractedRow {
+  date: string;
+  description: string;
+  amount: string;
+}
+
+function parseExtractionResponse(text: string): ExtractedRow[] {
+  const arr = parseJsonArrayLoose(text);
+  const rows: ExtractedRow[] = [];
+  for (const entry of arr) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { date, description, amount } = entry as Record<string, unknown>;
+    if (typeof date !== "string" || !date.trim()) continue;
+    if (typeof description !== "string" || !description.trim()) continue;
+    if (typeof amount !== "string" && typeof amount !== "number") continue;
+    rows.push({ date: date.trim(), description: description.trim(), amount: String(amount).trim() });
+  }
+  if (rows.length === 0) throw new Error("No usable transactions in response");
+  return rows.slice(0, 1000); // same cap as CSV's MAX_ROWS
+}
+
+aiRouter.post(
+  "/extract-pdf",
+  asyncHandler(async (req, res) => {
+    const parsed = extractPdfBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid request", fields: zodFieldErrors(parsed.error) });
+    }
+    const prompt = buildExtractionPrompt(parsed.data.text);
+    try {
+      let rows: ExtractedRow[];
+      try {
+        rows = parseExtractionResponse(await callGeminiWithBackoff(prompt, "extract-pdf", 1));
+      } catch (e) {
+        if (e instanceof GeminiError) throw e;
+        // One retry on a parse failure, same defensive rule as categorization/suggestions.
+        rows = parseExtractionResponse(await callGeminiWithBackoff(prompt, "extract-pdf-retry", 1));
+      }
+      res.json({ rows });
+    } catch (e) {
+      const message =
+        e instanceof GeminiError
+          ? e.kind === "no_key" || e.status === 400 || e.status === 403
+            ? "Gemini API key missing or invalid — add it to server/.env and try again."
+            : `${e.message}. Try again in a minute.`
+          : "The AI couldn't find any transactions in that text — double-check the PDF actually has a transaction table, or try again.";
+      res.status(502).json({ error: "extraction_failed", message });
+    }
+  })
+);
 
 aiRouter.post(
   "/flags/recompute",

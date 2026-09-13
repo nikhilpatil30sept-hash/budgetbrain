@@ -344,3 +344,112 @@ describe("POST /api/flags/recompute — anomaly write-back", () => {
     expect(res.status).toBe(401);
   });
 });
+
+
+function geminiExtractionResponse(rows: { date: string; description: string; amount: string }[]) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: JSON.stringify(rows) }] } }],
+    }),
+  } as unknown as Response;
+}
+
+describe("POST /api/extract-pdf", () => {
+  test("returns extracted rows exactly as the model reported them", async () => {
+    const alice = await newUser("extract-pdf-ok@example.com");
+    const fetchMock = vi.fn().mockResolvedValue(
+      geminiExtractionResponse([
+        { date: "Jul 23", description: "STARBUCKS COFFEE", amount: "-4.50" },
+        { date: "Jul 25", description: "PAYROLL DEPOSIT", amount: "2000.00" },
+      ])
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await alice.post("/api/extract-pdf").send({
+      text: "Date Description Amount\nJul 23 STARBUCKS COFFEE -4.50\nJul 25 PAYROLL DEPOSIT 2000.00",
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toEqual([
+      { date: "Jul 23", description: "STARBUCKS COFFEE", amount: "-4.50" },
+      { date: "Jul 25", description: "PAYROLL DEPOSIT", amount: "2000.00" },
+    ]);
+  });
+
+  test("drops malformed entries but keeps the usable ones", async () => {
+    const alice = await newUser("extract-pdf-partial@example.com");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify([
+                    { date: "Jul 23", description: "STARBUCKS COFFEE", amount: "-4.50" },
+                    { date: "", description: "missing date", amount: "-1.00" },
+                    { description: "missing date field entirely", amount: "-1.00" },
+                  ]),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    } as unknown as Response);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await alice.post("/api/extract-pdf").send({ text: "Date Description Amount\nJul 23 STARBUCKS COFFEE -4.50" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toEqual([{ date: "Jul 23", description: "STARBUCKS COFFEE", amount: "-4.50" }]);
+  });
+
+  test("400s on text that's too short, without ever calling Gemini", async () => {
+    const alice = await newUser("extract-pdf-short@example.com");
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await alice.post("/api/extract-pdf").send({ text: "too short" });
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("400s on text over the size cap", async () => {
+    const alice = await newUser("extract-pdf-toolong@example.com");
+    const res = await alice.post("/api/extract-pdf").send({ text: "x".repeat(60001) });
+    expect(res.status).toBe(400);
+  });
+
+  test("502s with a friendly message when Gemini has no usable transactions to report", async () => {
+    const alice = await newUser("extract-pdf-empty@example.com");
+    const fetchMock = vi.fn().mockResolvedValue(geminiExtractionResponse([]));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const res = await alice.post("/api/extract-pdf").send({ text: "Date Description Amount\nnothing recognizable here" });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("extraction_failed");
+    expect(res.body.message).toMatch(/couldn't find any transactions/i);
+  });
+
+  test("502s with the missing-key message when GEMINI_API_KEY isn't set", async () => {
+    const alice = await newUser("extract-pdf-nokey@example.com");
+    delete process.env.GEMINI_API_KEY;
+
+    const res = await alice.post("/api/extract-pdf").send({ text: "Date Description Amount\nJul 23 STARBUCKS COFFEE -4.50" });
+
+    expect(res.status).toBe(502);
+    expect(res.body.message).toMatch(/GEMINI_API_KEY/);
+  });
+
+  test("requires a session", async () => {
+    const res = await request(app).post("/api/extract-pdf").send({ text: "Date Description Amount\nJul 23 STARBUCKS COFFEE -4.50" });
+    expect(res.status).toBe(401);
+  });
+});

@@ -1,17 +1,17 @@
 # 🧠 BudgetBrain
 
-Personal expense tracker with AI auto-categorization. Runs locally against a SQLite file, or deployed against a hosted [Turso](https://turso.tech) database — same driver, same code path, no branching. The only outbound call is to the free-tier Google Gemini API, and only ever from the backend.
+Personal expense tracker with AI auto-categorization. Runs locally against a SQLite file, or deployed against a hosted [Turso](https://turso.tech) database — same driver, same code path, no branching. The only outbound calls are to the free-tier Google Gemini API, and only ever from the backend — never the raw file, always redacted first for PDF import (see Security notes).
 
 [![CI](https://github.com/nikhilpatil30sept-hash/budgetbrain/actions/workflows/ci.yml/badge.svg)](https://github.com/nikhilpatil30sept-hash/budgetbrain/actions/workflows/ci.yml)
 
 **Modules**
 
-1. **Transaction Ledger** — manual entry + CSV import (with a mandatory column-mapping/preview step), dashboard with summary cards, category pie, 6-month spending bar, and a paginated, filterable transaction list with inline category editing.
+1. **Transaction Ledger** — manual entry + CSV import (with a mandatory column-mapping/preview step) + PDF statement import (digital statements only; AI-extracted via Gemini after the text is cropped and redacted in the browser), dashboard with summary cards, category pie, 6-month spending bar, and a paginated, filterable transaction list with inline category editing.
 2. **AI Auto-Categorization** — Gemini assigns categories to `Uncategorized` transactions in batches of ≤40 with a 5s delay between batches (free-tier friendly), backed by a merchant cache so a merchant is only ever paid for once. Local anomaly flagging (3× category median / 30%-of-income rules) and cached budget suggestions.
 3. **Smart Goal Tracking** — savings goals with required-weekly-savings math, spending velocity (trailing 8 weeks), on-track status, and projected completion.
 4. **Accounts** — email/password signup and login (session cookies, not JWT), forgot/reset password by email, and every other module scoped to the logged-in user.
 
-**Stack:** React 18 + Vite + TypeScript + Tailwind + Recharts · Express + TypeScript · SQLite (`@libsql/client` — a local file locally, [Turso](https://turso.tech) in production, same driver and code path either way) · `zod` · `papaparse` · Gemini `gemini-2.0-flash`.
+**Stack:** React 18 + Vite + TypeScript + Tailwind + Recharts · Express + TypeScript · SQLite (`@libsql/client` — a local file locally, [Turso](https://turso.tech) in production, same driver and code path either way) · `zod` · `papaparse` · `pdfjs-dist` (client-side PDF text extraction) · Gemini `gemini-3.5-flash-lite`.
 
 ## Setup
 
@@ -62,7 +62,7 @@ _Run `npm run seed && npm run dev` and open http://localhost:5173 — screenshot
 - All money values are **integer cents** end-to-end (`*_cents` fields); conversion to dollars happens only at render/input time, with string/integer math — no floats.
 - All SQL goes through parameterized queries via `@libsql/client` (never string-concatenated); all request bodies are validated with `zod` (400 + field-level messages).
 - `express-rate-limit` caps the API at 300 req/min.
-- Categorization sends only description strings to Gemini; budget suggestions send only per-category monthly totals — never the raw transaction history.
+- Categorization sends only description strings to Gemini; budget suggestions send only per-category monthly totals; PDF import sends the statement's transaction-table text — cropped to exclude the name/address/account-number block above it, and with any remaining long ID-shaped numbers, emails, or phone numbers redacted, all client-side before the request is made — never the raw PDF, never the un-redacted text, never the raw transaction history.
 - No `dangerouslySetInnerHTML` anywhere; React escaping handles CSV cell rendering.
 - Passwords are hashed with `bcryptjs` (never stored or logged in plaintext); sessions are opaque random tokens looked up server-side (a `sessions` table), not JWTs — logging out actually invalidates them rather than just discarding a client-side token.
 - Only a SHA-256 hash of a session or password-reset token is ever stored — a copy of the database alone can't be replayed as a valid cookie or reset link.
@@ -85,6 +85,7 @@ Places where the requirements left room for interpretation:
 - **Transfers** are excluded from spent/income/net totals, charts, velocity, and anomaly checks, so moving money between your own accounts doesn't read as spending.
 - **Duplicate CSV rows** (same date, amount, normalized merchant) are imported anyway and reported as warnings in the import summary ("warn, don't block"), with a pointer to review/delete them on the dashboard.
 - **Ambiguous CSV dates** (e.g. `03/04/2025`) hard-require a MM/DD vs DD/MM radio choice before the import will run; unambiguous rows (`14/02/2025`, ISO, `Mar 4, 2025`) parse automatically.
+- **PDF import is digital-only, any bank.** Scanned/photographed statements are rejected outright (no OCR) — we check for a real text layer before ever calling the AI. Rather than trying to mask every possible PII field for every bank's layout, the app finds where the transaction table starts and only sends that part onward; the identity block above it is never transmitted. A defense-in-depth regex pass also redacts long ID-shaped numbers, emails, and phone numbers in what remains. The masked text is shown to you before anything is sent, and extracted rows flow through the exact same date/amount parsing CSV import uses.
 - **Categorize after import** is a one-click button on the import summary rather than fully automatic, so an import never spends API quota without an explicit go-ahead.
 - **Dismissed anomaly flags stay dismissed** across recomputes (a `flag_dismissed` column), otherwise every re-run would resurrect them.
 - **Goal progress** is measured as cumulative net savings (income − expenses, Transfers excluded) since the goal's creation date, clamped to [0, target] — the v1 schema has no per-goal contributions.
