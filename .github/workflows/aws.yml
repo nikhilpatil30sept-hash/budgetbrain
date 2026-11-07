@@ -36,13 +36,11 @@ jobs:
     if: inputs.action == 'deploy'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Only jobs in this environment can assume the AWS role (see the trust
-    # policy in infra/bootstrap/bootstrap.yaml), and the environment holds
-    # the app's secrets.
+    # The environment holds the AWS key and the app's secrets, and only
+    # allows the main branch, so no other branch can deploy.
     environment: aws
     permissions:
       contents: read
-      id-token: write
     env:
       IMAGE_TAG: ${{ github.sha }}
 
@@ -50,12 +48,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sign in to AWS with GitHub OIDC (no stored AWS keys)
+      # The deploy user's access key, stored only as secrets of the "aws"
+      # environment. Keyless GitHub OIDC sign-in is blocked by this AWS
+      # account's Organizations policy (see infra/bootstrap/bootstrap.yaml).
+      - name: Sign in to AWS as the budgetbrain-github-deploy user
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
-          role-duration-seconds: 7200
 
       # The values go from GitHub environment secrets straight into SSM
       # Parameter Store, so they never appear in Terraform state or the repo.
@@ -216,18 +217,20 @@ jobs:
     environment: aws
     permissions:
       contents: read
-      id-token: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sign in to AWS with GitHub OIDC (no stored AWS keys)
+      # The deploy user's access key, stored only as secrets of the "aws"
+      # environment. Keyless GitHub OIDC sign-in is blocked by this AWS
+      # account's Organizations policy (see infra/bootstrap/bootstrap.yaml).
+      - name: Sign in to AWS as the budgetbrain-github-deploy user
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
-          role-duration-seconds: 7200
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3

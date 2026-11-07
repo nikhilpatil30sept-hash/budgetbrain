@@ -1,25 +1,17 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   BudgetBrain AWS bootstrap, created once from the CloudFormation console.
-  Holds what must outlive a Terraform destroy: the GitHub deploy role
-  (GitHub OIDC, no stored AWS keys), the Terraform state bucket, the ECR
-  image repository and a monthly cost budget with email alerts.
+  Holds what must outlive a Terraform destroy: the GitHub Actions deploy user
+  and its least-privilege policy, the Terraform state bucket, the ECR image
+  repository and a monthly cost budget with email alerts.
+
+# Why a deploy user and not GitHub OIDC: this account's AWS Organizations
+# policy denies iam:CreateOpenIDConnectProvider, so keyless OIDC sign-in from
+# GitHub isn't available here. The fallback is an IAM user with no console
+# access, whose access key lives only in the GitHub "aws" environment and
+# whose permissions cover this app and nothing else.
 
 Parameters:
-  GitHubOwner:
-    Type: String
-    Default: nikhilpatil30sept-hash
-    Description: GitHub user or organization that owns the repository.
-  GitHubRepo:
-    Type: String
-    Default: budgetbrain
-    Description: Repository allowed to deploy.
-  GitHubEnvironment:
-    Type: String
-    Default: aws
-    Description: >-
-      Only workflow jobs running in this GitHub environment can assume the
-      deploy role. Restrict the environment to the main branch in GitHub.
   BudgetEmail:
     Type: String
     AllowedPattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
@@ -32,72 +24,164 @@ Parameters:
     Description: Monthly cost budget in USD. Alerts at 50% and 80% actual, and 100% forecast.
 
 Resources:
-  GitHubOidcProvider:
-    Type: AWS::IAM::OIDCProvider
+  DeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: ECS Express Mode and ECR login don't support resource-level permissions for every action they need; everything else here is scoped to budgetbrain resources.
+          - id: CKV_AWS_109
+            comment: Same reason; permissions-management actions are limited to roles named budgetbrain-*.
     Properties:
-      Url: https://token.actions.githubusercontent.com
-      ClientIdList:
-        - sts.amazonaws.com
-      ThumbprintList:
-        - 6938fd4d98bab03faadb97b34396831e3780aea1
-        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
-
-  DeployRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: budgetbrain-github-deploy
-      Description: Assumed by GitHub Actions (OIDC) to deploy and destroy BudgetBrain.
-      MaxSessionDuration: 7200
-      AssumeRolePolicyDocument:
+      ManagedPolicyName: budgetbrain-deploy
+      Description: What the GitHub Actions deploy workflow needs to deploy, test and destroy BudgetBrain, and nothing more.
+      PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
-            Principal:
-              Federated: !Ref GitHubOidcProvider
-            Action: sts:AssumeRoleWithWebIdentity
+          - Sid: WhoAmI
+            Effect: Allow
+            Action: sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: PushAndInspectAppImages
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:CompleteLayerUpload
+              - ecr:DescribeImageScanFindings
+              - ecr:DescribeImages
+              - ecr:DescribeRepositories
+              - ecr:GetDownloadUrlForLayer
+              - ecr:InitiateLayerUpload
+              - ecr:ListImages
+              - ecr:ListTagsForResource
+              - ecr:PutImage
+              - ecr:UploadLayerPart
+            Resource: !GetAtt AppRepository.Arn
+          - Sid: RunTheAppOnEcs
+            Effect: Allow
+            Action: ecs:*
+            Resource: "*"
+          - Sid: AppLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:TagLogGroup
+              - logs:ListTagsLogGroup
+              - logs:DescribeLogStreams
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/budgetbrain
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/budgetbrain:*
+          - Sid: AppSecretsAndDeployState
+            Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:DeleteParameter
+              - ssm:AddTagsToResource
+              - ssm:ListTagsForResource
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/budgetbrain/*
+          - Sid: SecureStringsWithTheSsmManagedKey
+            Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: "*"
             Condition:
               StringEquals:
-                token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}/${GitHubRepo}:environment:${GitHubEnvironment}
+                kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+          - Sid: TerraformState
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt TerraformStateBucket.Arn
+          - Sid: TerraformStateObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub ${TerraformStateBucket.Arn}/*
+          - Sid: AppRolesOnly
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/budgetbrain-*
+          - Sid: ServiceLinkedRolesForEcsAndLoadBalancing
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - ecs.amazonaws.com
+                  - ecs.application-autoscaling.amazonaws.com
+                  - elasticloadbalancing.amazonaws.com
+          - Sid: ReadOnlyLookups
+            Effect: Allow
+            Action:
+              - acm:DescribeCertificate
+              - acm:ListCertificates
+              - application-autoscaling:Describe*
+              - cloudwatch:DescribeAlarms
+              - ec2:Describe*
+              - elasticloadbalancing:Describe*
+              - kms:DescribeKey
+              - kms:ListAliases
+              - logs:DescribeLogGroups
+              - ssm:DescribeParameters
+            Resource: "*"
+
+  # Policies attach to the group, not the user (IAM best practice).
+  DeployersGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: budgetbrain-deployers
       ManagedPolicyArns:
-        # Everything except IAM and account management. IAM access is
-        # added below and limited to roles named budgetbrain-*.
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/PowerUserAccess
-      Policies:
-        - PolicyName: manage-budgetbrain-roles-only
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: AppRolesOnly
-                Effect: Allow
-                Action:
-                  - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:GetRole
-                  - iam:TagRole
-                  - iam:UntagRole
-                  - iam:UpdateRole
-                  - iam:UpdateAssumeRolePolicy
-                  - iam:AttachRolePolicy
-                  - iam:DetachRolePolicy
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:GetRolePolicy
-                  - iam:ListRolePolicies
-                  - iam:ListAttachedRolePolicies
-                  - iam:ListInstanceProfilesForRole
-                  - iam:PassRole
-                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/budgetbrain-*
-              - Sid: ServiceLinkedRolesForEcsAndLoadBalancing
-                Effect: Allow
-                Action: iam:CreateServiceLinkedRole
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    iam:AWSServiceName:
-                      - ecs.amazonaws.com
-                      - ecs.application-autoscaling.amazonaws.com
-                      - elasticloadbalancing.amazonaws.com
+        - !Ref DeployPolicy
+
+  # No password, so it can't sign in to the console. You create its access
+  # key yourself in the IAM console and paste it straight into GitHub.
+  DeployUser:
+    Type: AWS::IAM::User
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_273
+            comment: GitHub OIDC federation is denied by this account's AWS Organizations policy; a key-only user is the remaining way for CI to sign in.
+    Properties:
+      UserName: budgetbrain-github-deploy
+      Groups:
+        - !Ref DeployersGroup
 
   TerraformStateBucket:
     Type: AWS::S3::Bucket
@@ -223,9 +307,9 @@ Outputs:
   AwsRegion:
     Description: GitHub variable AWS_REGION
     Value: !Ref AWS::Region
-  DeployRoleArn:
-    Description: GitHub variable AWS_ROLE_ARN
-    Value: !GetAtt DeployRole.Arn
+  DeployUserName:
+    Description: Create this user's access key in IAM and store it as GitHub secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+    Value: !Ref DeployUser
   TerraformStateBucketName:
     Description: GitHub variable TF_STATE_BUCKET
     Value: !Ref TerraformStateBucket

@@ -1,7 +1,7 @@
 variable "region" {
-  description = "AWS region for the app. Must match the bootstrap stack's region."
+  description = "AWS region for the app. Must match the bootstrap stack's region (this account allows only us-east-2)."
   type        = string
-  default     = "ca-central-1"
+  default     = "us-east-2"
 }
 
 variable "app_name" {

@@ -1,10 +1,10 @@
 # BudgetBrain on AWS
 
-A second environment next to Render: the same Docker image, deployed to **Amazon ECS Express Mode** (Fargate behind an HTTPS Application Load Balancer), defined in **Terraform**, deployed and torn down from **GitHub Actions** with no stored AWS keys, and checked by **deployment tests** that run against the live URL after every deploy. Render stays the main production deployment.
+A second environment next to Render: the same Docker image, deployed to **Amazon ECS Express Mode** (Fargate behind an HTTPS Application Load Balancer), defined in **Terraform**, deployed and torn down from **GitHub Actions** by a least-privilege deploy user, and checked by **deployment tests** that run against the live URL after every deploy. Render stays the main production deployment.
 
 ```
 GitHub Actions (manual: deploy / destroy)
-   │  OIDC sign-in, no AWS keys
+   │  deploy user's access key (GitHub environment secret)
    ▼
 ECR image ──► ECS Express Mode service (1 Fargate task, Node 24, non-root)
                  ▲
@@ -19,7 +19,7 @@ ECR image ──► ECS Express Mode service (1 Fargate task, Node 24, non-root)
 | Path | What it is |
 |---|---|
 | `Dockerfile`, `.dockerignore` | Two-stage image: builds server and client, then ships only `server/dist`, `client/dist` and the server's production dependencies. Runs as a non-root user. |
-| `infra/bootstrap/bootstrap.yaml` | CloudFormation, created once by hand: GitHub OIDC deploy role, Terraform state bucket, ECR repository, monthly cost budget. Everything that must survive a destroy. |
+| `infra/bootstrap/bootstrap.yaml` | CloudFormation, created once by hand: the GitHub Actions deploy user and its least-privilege policy, Terraform state bucket, ECR repository, monthly cost budget. Everything that must survive a destroy. |
 | `infra/terraform/` | The app environment: ECS cluster and Express Mode service, IAM task and infrastructure roles, CloudWatch log group. |
 | `.github/workflows/aws.yml` | Manual workflow: **deploy** (build, push, apply, test, roll back on failure) or **destroy**. |
 | `.github/workflows/ci.yml` | On every push: builds the image and runs the deployment tests against the container (`docker-smoke`), and validates and security-scans the infrastructure code (`infra-checks`). |
@@ -46,11 +46,24 @@ Two details worth knowing:
 - **The auth rate limit is real in production** (20 requests per 15 minutes per IP) and the suite needs about 12. If a previous run used up the window, `global-setup.ts` waits for it to reset instead of failing, because a failure would trigger a rollback for a reason unrelated to the new version.
 - **BB-C9 only means something behind a real proxy.** Without one, `trust proxy = 1` makes Express believe whatever `X-Forwarded-For` the client sends, so each made-up address gets a fresh limit. Locally that's easy to show: three logins with three made-up addresses all report `RateLimit-Remaining: 19`. Behind the load balancer, which appends the real client address, the count has to go down.
 
+## Why a deploy user instead of GitHub OIDC
+
+The first design signed GitHub Actions in to AWS with OIDC: short-lived credentials, nothing stored. This account belongs to an AWS Organization whose service control policies deny `iam:CreateOpenIDConnectProvider` (and every region except `us-east-2`), so the bootstrap stack failed on the OIDC provider. A read-only `iam simulate-principal-policy` check confirmed everything else this setup needs is allowed in `us-east-2`.
+
+The fallback keeps the blast radius small:
+
+- **No console access.** The `budgetbrain-github-deploy` user has no password.
+- **Least privilege.** Its policy (via the `budgetbrain-deployers` group) covers this app's ECR repository, ECS, its log group, `/budgetbrain/*` parameters, the state bucket and IAM roles named `budgetbrain-*`. It can't launch EC2 instances or touch other resources.
+- **Stored in one place.** The access key exists only as secrets of the GitHub `aws` environment, which only `main` can use.
+- **Rotation.** Make a new key and delete the old one every 90 days, or deactivate the key whenever the environment is destroyed and you're not using it.
+
+On an account without that restriction, OIDC is the better choice.
+
 ## One-time setup
 
 You do these steps in the browser. Nothing here needs AWS keys on your Mac.
 
-1. **AWS account.** Create one at aws.amazon.com and pick the **Free plan**. Turn on MFA for the root user (IAM → Security credentials). In the console's top-right corner, choose **Canada (Central) ca-central-1**.
+1. **AWS account.** Create one at aws.amazon.com and pick the **Free plan**. Turn on MFA for how you sign in. Work in **US East (Ohio) us-east-2**: this account's organization policy blocks every other region.
 
 2. **A separate Turso database for AWS.** The deployment tests create a few throwaway accounts on every run, so keep them out of the Render production database:
    ```bash
@@ -62,12 +75,14 @@ You do these steps in the browser. Nothing here needs AWS keys on your Mac.
 
 3. **Bootstrap stack.** CloudFormation → **Create stack** → *With new resources* → *Upload a template file* → `infra/bootstrap/bootstrap.yaml`. Stack name `budgetbrain-bootstrap`, enter your email for `BudgetEmail`, keep the other defaults. Tick the IAM acknowledgement and submit. When it shows `CREATE_COMPLETE`, open the **Outputs** tab.
 
-4. **GitHub settings** for the `budgetbrain` repository:
-   - *Settings → Environments → New environment* named **`aws`**. Under *Deployment branches and tags*, choose *Selected branches* and add `main`.
-   - In that environment, add **secrets**: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and optionally `GEMINI_API_KEY` (without it the app runs with AI features off).
-   - *Settings → Secrets and variables → Actions → Variables*, add **repository variables** from the stack outputs: `AWS_REGION` (`ca-central-1`), `AWS_ROLE_ARN`, `TF_STATE_BUCKET`.
+4. **Access key for the deploy user.** IAM → *Users* → `budgetbrain-github-deploy` → *Security credentials* → **Create access key** → use case *Third-party service* (or *Application running outside AWS*) → **Create access key**. The secret is shown once: copy both values straight into GitHub in the next step, then close the page. Don't save them anywhere else.
 
-5. **Merge to `main`.** GitHub only lists a manually-run workflow once its file is on the default branch.
+5. **GitHub settings** for the `budgetbrain` repository:
+   - *Settings → Environments → New environment* named **`aws`**. Under *Deployment branches and tags*, choose *Selected branches* and add `main`.
+   - In that environment, add **secrets**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and optionally `GEMINI_API_KEY` (without it the app runs with AI features off).
+   - *Settings → Secrets and variables → Actions → Variables*, add **repository variables** from the stack outputs: `AWS_REGION` (`us-east-2`) and `TF_STATE_BUCKET`.
+
+6. **Merge to `main`.** GitHub only lists a manually-run workflow once its file is on the default branch.
 
 ## Deploy, test, destroy
 
@@ -87,7 +102,9 @@ If AWS reports that a service isn't available on the Free plan, the error says s
 
 | Symptom | Likely cause |
 |---|---|
-| `Not authorized to perform sts:AssumeRoleWithWebIdentity` | The job isn't running in the `aws` environment, the environment doesn't allow the branch you picked, or `AWS_ROLE_ARN` is wrong. |
+| `Could not load credentials` or `InvalidClientTokenId` at *Sign in to AWS* | The job isn't running in the `aws` environment, the environment doesn't allow the branch you picked, or the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets are missing, mistyped or deactivated. |
+| `explicit deny in a service control policy` | The account's organization policy blocked the action. Check the region is `us-east-2`; anything else, send the full message. |
+| `AccessDenied` for an action without "service control policy" | The deploy user's policy is missing a permission. Add the action to `DeployPolicy` in `bootstrap.yaml` and update the stack. |
 | `Add the TURSO_DATABASE_URL secret...` | The secret is missing from the `aws` environment (repository-level secrets aren't used). |
 | BB-C1 fails with `local-file` instead of `turso` | The Turso secret didn't reach the container. Check the parameter exists under `/budgetbrain/aws/` in Systems Manager → Parameter Store. |
 | Tests pause with "waiting ... for the window to reset" | Expected after back-to-back deploys; see the rate-limit note above. |

@@ -80,7 +80,7 @@ BudgetBrain deploys as one free web service on [Render](https://render.com), wit
 
 ### AWS (second environment)
 
-The same app also runs as a Docker container on **AWS ECS Express Mode** (Fargate behind an HTTPS load balancer), defined in Terraform and deployed or destroyed from GitHub Actions with OIDC sign-in, so no AWS keys are stored anywhere. After every deploy, deployment tests (BB-C1 to BB-C9) check the live URL: TLS, security headers, secure cookies, secrets wiring and proxy handling; a failure rolls back to the last good image. Setup, costs and the full test list are in [infra/README.md](infra/README.md).
+The same app also runs as a Docker container on **AWS ECS Express Mode** (Fargate behind an HTTPS load balancer), defined in Terraform and deployed or destroyed from GitHub Actions by a least-privilege deploy user (the AWS account's organization policy blocks keyless OIDC sign-in; see infra/README.md). After every deploy, deployment tests (BB-C1 to BB-C9) check the live URL: TLS, security headers, secure cookies, secrets wiring and proxy handling; a failure rolls back to the last good image. Setup, costs and the full test list are in [infra/README.md](infra/README.md).
 
 ## Design decisions / assumptions
 
