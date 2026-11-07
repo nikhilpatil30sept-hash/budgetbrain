@@ -161,16 +161,10 @@ Resources:
               - ssm:DescribeParameters
             Resource: "*"
 
-  # Policies attach to the group, not the user (IAM best practice).
-  DeployersGroup:
-    Type: AWS::IAM::Group
-    Properties:
-      GroupName: budgetbrain-deployers
-      ManagedPolicyArns:
-        - !Ref DeployPolicy
-
   # No password, so it can't sign in to the console. You create its access
-  # key yourself in the IAM console and paste it straight into GitHub.
+  # key yourself in the IAM console and paste it straight into GitHub. The
+  # policy attaches to the user directly because this account's
+  # Organizations policy also denies IAM groups.
   DeployUser:
     Type: AWS::IAM::User
     Metadata:
@@ -178,10 +172,12 @@ Resources:
         skip:
           - id: CKV_AWS_273
             comment: GitHub OIDC federation is denied by this account's AWS Organizations policy; a key-only user is the remaining way for CI to sign in.
+          - id: CKV_AWS_40
+            comment: iam:CreateGroup is denied by this account's AWS Organizations policy, so the policy can't go through a group.
     Properties:
       UserName: budgetbrain-github-deploy
-      Groups:
-        - !Ref DeployersGroup
+      ManagedPolicyArns:
+        - !Ref DeployPolicy
 
   TerraformStateBucket:
     Type: AWS::S3::Bucket

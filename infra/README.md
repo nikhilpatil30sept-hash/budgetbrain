@@ -48,12 +48,12 @@ Two details worth knowing:
 
 ## Why a deploy user instead of GitHub OIDC
 
-The first design signed GitHub Actions in to AWS with OIDC: short-lived credentials, nothing stored. This account belongs to an AWS Organization whose service control policies deny `iam:CreateOpenIDConnectProvider` (and every region except `us-east-2`), so the bootstrap stack failed on the OIDC provider. A read-only `iam simulate-principal-policy` check confirmed everything else this setup needs is allowed in `us-east-2`.
+The first design signed GitHub Actions in to AWS with OIDC: short-lived credentials, nothing stored. This account belongs to an AWS Organization whose service control policies deny `iam:CreateOpenIDConnectProvider`, IAM groups, and every region except `us-east-2`, so the bootstrap stack failed on the OIDC provider. A read-only `iam simulate-principal-policy` check confirmed everything else this setup needs is allowed in `us-east-2`.
 
 The fallback keeps the blast radius small:
 
 - **No console access.** The `budgetbrain-github-deploy` user has no password.
-- **Least privilege.** Its policy (via the `budgetbrain-deployers` group) covers this app's ECR repository, ECS, its log group, `/budgetbrain/*` parameters, the state bucket and IAM roles named `budgetbrain-*`. It can't launch EC2 instances or touch other resources.
+- **Least privilege.** Its one policy (attached to the user directly, since the organization also denies IAM groups) covers this app's ECR repository, ECS, its log group, `/budgetbrain/*` parameters, the state bucket and IAM roles named `budgetbrain-*`. It can't launch EC2 instances or touch other resources.
 - **Stored in one place.** The access key exists only as secrets of the GitHub `aws` environment, which only `main` can use.
 - **Rotation.** Make a new key and delete the old one every 90 days, or deactivate the key whenever the environment is destroyed and you're not using it.
 
