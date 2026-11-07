@@ -95,3 +95,107 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report/
           retention-days: 14
+
+  # Builds the production Docker image and runs the deployment tests
+  # (e2e/cloud, BB-C1 to BB-C9) against the running container, so an image
+  # that can't start, serve the client or keep its headers fails here, long
+  # before anything reaches AWS. HTTPS-only checks skip themselves on
+  # http://localhost and run in the AWS deploy workflow instead.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the production image
+        run: docker build -t budgetbrain:ci .
+
+      - name: Start the container (production mode, local SQLite)
+        run: |
+          docker run -d --name budgetbrain -p 3001:3001 budgetbrain:ci
+          for _ in $(seq 1 45); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' budgetbrain)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          echo "Container health: $status"
+          [ "$status" = healthy ]
+
+      - name: The container runs as a non-root user
+        run: test "$(docker exec budgetbrain id -u)" != "0"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install e2e dependencies and Chromium
+        working-directory: e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run deployment tests against the container
+        working-directory: e2e
+        env:
+          CI: true
+          BASE_URL: http://localhost:3001
+          EXPECT_DATABASE: local-file
+          EXPECT_GEMINI_KEY: "false"
+        run: npx playwright test -c playwright.cloud.config.ts
+
+      - name: Container logs
+        if: failure()
+        run: docker logs budgetbrain
+
+      - name: Upload deployment test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-report
+          path: e2e/playwright-report-cloud/
+          retention-days: 14
+
+  # Static checks on the AWS infrastructure code. Never touches AWS: no
+  # credentials, no state backend.
+  infra-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "<2.0.0"
+
+      - name: Terraform format
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform validate
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checkov and cfn-lint
+        run: pip install checkov cfn-lint
+
+      - name: Lint the bootstrap CloudFormation template
+        run: cfn-lint infra/bootstrap/bootstrap.yaml
+
+      # Security misconfiguration scan for both the Terraform and the
+      # CloudFormation. Deliberate exceptions are skipped in the code
+      # itself, each with its reason next to it.
+      - name: Security scan (checkov)
+        run: checkov -d infra --compact --quiet --skip-download

@@ -42,6 +42,19 @@ function getClient(): Client {
   return _client;
 }
 
+/**
+ * Which storage this process is really using, in the same priority order as
+ * resolveDbUrl(). Reported by /api/health so a deployment can prove it
+ * reached the real database: a missing TURSO_DATABASE_URL secret doesn't
+ * crash anything, the server just falls back to a local SQLite file that
+ * disappears with the container -- the silent data-loss case worth catching.
+ */
+export function databaseKind(): "turso" | "memory" | "local-file" {
+  if (process.env.TURSO_DATABASE_URL) return "turso";
+  if (process.env.DATABASE_PATH === ":memory:") return "memory";
+  return "local-file";
+}
+
 function isLocalFile(): boolean {
   return !process.env.TURSO_DATABASE_URL && process.env.DATABASE_PATH !== ":memory:";
 }

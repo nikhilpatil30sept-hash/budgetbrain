@@ -13,6 +13,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { goalsRouter } from "./routes/goals.js";
 import { aiRouter } from "./routes/ai.js";
 import { hasApiKey } from "./services/gemini.js";
+import { databaseKind } from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // server/dist/app.js -> repo root -> client/dist
@@ -87,7 +88,12 @@ export function createApp() {
   );
 
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, gemini_key_configured: hasApiKey(), time: new Date().toISOString() });
+    res.json({
+      ok: true,
+      gemini_key_configured: hasApiKey(),
+      database: databaseKind(),
+      time: new Date().toISOString(),
+    });
   });
 
   // Signup/login/logout/forgot-password/reset-password — no login required

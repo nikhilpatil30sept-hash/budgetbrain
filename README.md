@@ -78,6 +78,10 @@ BudgetBrain deploys as one free web service on [Render](https://render.com), wit
 3. In the Render dashboard, set `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `NODE_ENV=production`, `GEMINI_API_KEY`, `RESEND_API_KEY`, `MAIL_FROM`, and `APP_URL` (the `https://<your-service>.onrender.com` URL Render assigns — needed so password-reset emails link to the right place). Don't set `PORT` — Render injects it.
 4. Deploy. The free tier sleeps after 15 minutes idle, so the first request after a quiet period takes about a minute to wake back up — expected, not a bug.
 
+### AWS (second environment)
+
+The same app also runs as a Docker container on **AWS ECS Express Mode** (Fargate behind an HTTPS load balancer), defined in Terraform and deployed or destroyed from GitHub Actions with OIDC sign-in, so no AWS keys are stored anywhere. After every deploy, deployment tests (BB-C1 to BB-C9) check the live URL: TLS, security headers, secure cookies, secrets wiring and proxy handling; a failure rolls back to the last good image. Setup, costs and the full test list are in [infra/README.md](infra/README.md).
+
 ## Design decisions / assumptions
 
 Places where the requirements left room for interpretation:
@@ -130,6 +134,7 @@ Roughly 169 automated tests plus 17 end-to-end journeys, all gated by CI on ever
 | **Integration** | `server/src/__tests__/*.integration.test.ts` | 93 | Real requests through the whole Express app via `supertest` into a real DB — no port bound, no browser. Auth, transactions, goals, settings, summary maths, AI orchestration, cross-user isolation. |
 | **Component** | `client/src/**/__tests__/*.test.tsx` | 20 | React Testing Library + jsdom. Queries by visible label and accessible role, never by CSS class — so a missing label breaks the test. |
 | **End-to-end** | `e2e/tests/*.spec.ts` | 17 × 4 browsers | Playwright against Chromium, Firefox, WebKit and a Pixel 5 viewport. Auth flows, transaction entry, validation rejections, layout, persistence, accessibility. |
+| **Deployment** | `e2e/cloud/*.spec.ts` | 9 | Playwright against a running production build, not the dev server: the Docker image in CI, and the live HTTPS URL after each AWS deploy. Health and database wiring, TLS, security headers, static hosting, JSON errors, session cookie flags, a signup/login journey with no CSP violations, and rate limiting behind the load balancer. |
 
 ```bash
 npm test                 # all 169, both workspaces, ~12s
@@ -146,7 +151,7 @@ cd e2e && npx playwright test   # the browser suite, ~90s
 - The e2e suite runs serially (`workers: 1`) because every spec shares one dev server and one database, and some assert on global figures — BB-1 checks the monthly total moves by exactly the amount added. Parallelising without per-test data isolation would trade a slow suite for a flaky one.
 - Rate limits are environment-gated (300/min in production, 2,000 elsewhere; `/api/auth/*` 20 per 15 min in production, 1,000 elsewhere). A full four-browser Playwright run generates enough traffic from one address to exhaust the production limits, which produced `429`s that looked exactly like flaky timing until diagnosed.
 
-**CI** (`.github/workflows/ci.yml`) runs on every push and PR, ordered cheapest-first so a compile error costs seconds rather than minutes: install → lint → `npm audit --omit=dev` → build → unit/integration with coverage → seed → Playwright across all four browsers. Coverage and Playwright reports upload as artifacts even on failure. `main` deploys to Render, so this pipeline is the last gate before production.
+**CI** (`.github/workflows/ci.yml`) runs on every push and PR, ordered cheapest-first so a compile error costs seconds rather than minutes: install → lint → `npm audit --omit=dev` → build → unit/integration with coverage → seed → Playwright across all four browsers. Coverage and Playwright reports upload as artifacts even on failure. `main` deploys to Render, so this pipeline is the last gate before production. Two jobs run alongside it: `docker-smoke` builds the production image and runs the deployment tests against the container, and `infra-checks` runs `terraform fmt`/`validate`, `cfn-lint` and a checkov security scan over `infra/`.
 
 **Known gaps, not yet covered:**
 
