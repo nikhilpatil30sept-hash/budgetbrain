@@ -102,12 +102,23 @@ jobs:
             docker push "$IMAGE"
           fi
 
-      # ECR scans every pushed image for known CVEs. Reported, not gating:
-      # most findings sit in the Node base image and are fixed by rebuilding
-      # on a newer one, not by blocking this deploy.
+      # ECR scans every pushed image for known CVEs (registry scan-on-push
+      # rule in bootstrap.yaml). Reported, not gating: most findings sit in
+      # the Node base image and are fixed by rebuilding on a newer one, not by
+      # blocking this deploy. An image pushed before scan-on-push was on, or
+      # whose scan never started, gets a one-off manual scan instead.
       - name: Image vulnerability scan (ECR)
         continue-on-error: true
         run: |
+          scan_exists() {
+            aws ecr describe-image-scan-findings --repository-name "$REPOSITORY" \
+              --image-id imageTag="$IMAGE_TAG" > /dev/null 2>&1
+          }
+          for _ in $(seq 1 12); do scan_exists && break; sleep 5; done
+          if ! scan_exists; then
+            echo "No scan found for $IMAGE_TAG; starting one."
+            aws ecr start-image-scan --repository-name "$REPOSITORY" --image-id imageTag="$IMAGE_TAG" > /dev/null
+          fi
           aws ecr wait image-scan-complete --repository-name "$REPOSITORY" --image-id imageTag="$IMAGE_TAG"
           {
             echo "### ECR image scan for $IMAGE_TAG"
