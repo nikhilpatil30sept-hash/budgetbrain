@@ -27,13 +27,15 @@ ENV NODE_ENV=production \
     PORT=3001
 WORKDIR /app
 
-# The lockfile IS used here: it pins every server runtime dependency,
-# including libSQL's Linux binaries, and --workspace=server installs only
-# the server's production dependencies (no React, Three.js or Vite).
-COPY package.json package-lock.json ./
+# Server production dependencies only (--workspace=server: no React,
+# Three.js or Vite). Resolved fresh like the build stage, ci.yml and Render,
+# so the image ships the same versions CI's `npm audit --omit=dev` gate
+# checks, including security patches published since the lockfile was
+# written.
+COPY package.json ./
 COPY client/package.json client/
 COPY server/package.json server/
-RUN npm ci --omit=dev --workspace=server --no-audit --no-fund \
+RUN npm install --omit=dev --workspace=server --no-audit --no-fund \
     && npm cache clean --force
 
 COPY --from=build /app/server/dist server/dist
