@@ -1,0 +1,314 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  BudgetBrain AWS bootstrap, created once from the CloudFormation console.
+  Holds what must outlive a Terraform destroy: the GitHub Actions deploy user
+  and its least-privilege policy, the Terraform state bucket, the ECR image
+  repository and a monthly cost budget with email alerts.
+
+# Why a deploy user and not GitHub OIDC: this account's AWS Organizations
+# policy denies iam:CreateOpenIDConnectProvider, so keyless OIDC sign-in from
+# GitHub isn't available here. The fallback is an IAM user with no console
+# access, whose access key lives only in the GitHub "aws" environment and
+# whose permissions cover this app and nothing else.
+
+Parameters:
+  BudgetEmail:
+    Type: String
+    AllowedPattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+    ConstraintDescription: Must be an email address.
+    Description: Where AWS Budgets sends cost alerts.
+  MonthlyBudgetUSD:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Monthly cost budget in USD. Alerts at 50% and 80% actual, and 100% forecast.
+
+Resources:
+  DeployPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: ECS Express Mode and ECR login don't support resource-level permissions for every action they need; everything else here is scoped to budgetbrain resources.
+          - id: CKV_AWS_109
+            comment: Same reason; permissions-management actions are limited to roles named budgetbrain-*.
+    Properties:
+      ManagedPolicyName: budgetbrain-deploy
+      Description: What the GitHub Actions deploy workflow needs to deploy, test and destroy BudgetBrain, and nothing more.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: WhoAmI
+            Effect: Allow
+            Action: sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: EcrLogin
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: PushAndInspectAppImages
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:CompleteLayerUpload
+              - ecr:DescribeImageScanFindings
+              - ecr:DescribeImages
+              - ecr:DescribeRepositories
+              - ecr:GetDownloadUrlForLayer
+              - ecr:InitiateLayerUpload
+              - ecr:ListImages
+              - ecr:ListTagsForResource
+              - ecr:PutImage
+              - ecr:UploadLayerPart
+            Resource: !GetAtt AppRepository.Arn
+          - Sid: RunTheAppOnEcs
+            Effect: Allow
+            Action: ecs:*
+            Resource: "*"
+          - Sid: AppLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:TagLogGroup
+              - logs:ListTagsLogGroup
+              - logs:DescribeLogStreams
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/budgetbrain
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/budgetbrain:*
+          - Sid: AppSecretsAndDeployState
+            Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:DeleteParameter
+              - ssm:AddTagsToResource
+              - ssm:ListTagsForResource
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/budgetbrain/*
+          - Sid: SecureStringsWithTheSsmManagedKey
+            Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+          - Sid: TerraformState
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt TerraformStateBucket.Arn
+          - Sid: TerraformStateObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub ${TerraformStateBucket.Arn}/*
+          - Sid: AppRolesOnly
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:UpdateRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListInstanceProfilesForRole
+              - iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/budgetbrain-*
+          - Sid: ServiceLinkedRolesForEcsAndLoadBalancing
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - ecs.amazonaws.com
+                  - ecs.application-autoscaling.amazonaws.com
+                  - elasticloadbalancing.amazonaws.com
+          - Sid: ReadOnlyLookups
+            Effect: Allow
+            Action:
+              - acm:DescribeCertificate
+              - acm:ListCertificates
+              - application-autoscaling:Describe*
+              - cloudwatch:DescribeAlarms
+              - ec2:Describe*
+              - elasticloadbalancing:Describe*
+              - kms:DescribeKey
+              - kms:ListAliases
+              - logs:DescribeLogGroups
+              - ssm:DescribeParameters
+            Resource: "*"
+
+  # No password, so it can't sign in to the console. You create its access
+  # key yourself in the IAM console and paste it straight into GitHub. The
+  # policy attaches to the user directly because this account's
+  # Organizations policy also denies IAM groups.
+  DeployUser:
+    Type: AWS::IAM::User
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_273
+            comment: GitHub OIDC federation is denied by this account's AWS Organizations policy; a key-only user is the remaining way for CI to sign in.
+          - id: CKV_AWS_40
+            comment: iam:CreateGroup is denied by this account's AWS Organizations policy, so the policy can't go through a group.
+    Properties:
+      UserName: budgetbrain-github-deploy
+      ManagedPolicyArns:
+        - !Ref DeployPolicy
+
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: Holds only Terraform state, written by one deploy role; versioning keeps every change, so a second access-log bucket adds cost without adding much.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub budgetbrain-tfstate-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-state-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyPlainHttp
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub ${TerraformStateBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AppRepository:
+    Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_136
+            comment: Images are encrypted at rest with AES-256 (EncryptionType below); a customer-managed KMS key would add monthly cost for a public app's image.
+    Properties:
+      RepositoryName: budgetbrain
+      # Tags are git commit SHAs; immutable tags mean a SHA always points at
+      # the image that was tested, which is what makes rollback trustworthy.
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the 10 most recent images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: budgetbrain-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUSD
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+
+Outputs:
+  AwsRegion:
+    Description: GitHub variable AWS_REGION
+    Value: !Ref AWS::Region
+  DeployUserName:
+    Description: Create this user's access key in IAM and store it as GitHub secrets AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+    Value: !Ref DeployUser
+  TerraformStateBucketName:
+    Description: GitHub variable TF_STATE_BUCKET
+    Value: !Ref TerraformStateBucket
+  EcrRepositoryUri:
+    Description: Where the deploy workflow pushes images
+    Value: !GetAtt AppRepository.RepositoryUri

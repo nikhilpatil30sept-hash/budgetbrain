@@ -1,0 +1,272 @@
+name: AWS deploy
+
+# Run by hand from the Actions tab. "deploy" builds the selected branch into
+# an image, deploys it to ECS Express Mode, runs the deployment tests against
+# the live HTTPS URL and rolls back to the last good image if they fail.
+# "destroy" removes the running app so it stops costing money; the image
+# registry, secrets, state bucket and budget stay (see infra/README.md).
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options:
+          - deploy
+          - destroy
+        default: deploy
+
+# One AWS change at a time; a second run waits instead of fighting over state.
+concurrency:
+  group: aws-budgetbrain
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# AWS_REGION is set for every later step by configure-aws-credentials.
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  REPOSITORY: budgetbrain
+  PARAM_PREFIX: /budgetbrain/aws
+
+jobs:
+  deploy:
+    if: inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # The environment holds the AWS key and the app's secrets, and only
+    # allows the main branch, so no other branch can deploy.
+    environment: aws
+    permissions:
+      contents: read
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The deploy user's access key, stored only as secrets of the "aws"
+      # environment. Keyless GitHub OIDC sign-in is blocked by this AWS
+      # account's Organizations policy (see infra/bootstrap/bootstrap.yaml).
+      - name: Sign in to AWS as the budgetbrain-github-deploy user
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The values go from GitHub environment secrets straight into SSM
+      # Parameter Store, so they never appear in Terraform state or the repo.
+      - name: Store app secrets in Parameter Store
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          put() {
+            aws ssm put-parameter --name "$PARAM_PREFIX/$1" --type SecureString \
+              --value "$2" --overwrite > /dev/null
+          }
+          for name in TURSO_DATABASE_URL TURSO_AUTH_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Add the $name secret to the 'aws' environment in GitHub first."
+              exit 1
+            fi
+            put "$name" "${!name}"
+          done
+          if [ -n "$GEMINI_API_KEY" ]; then
+            put GEMINI_API_KEY "$GEMINI_API_KEY"
+            echo "WITH_GEMINI=true" >> "$GITHUB_ENV"
+          else
+            echo "WITH_GEMINI=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tags are immutable in ECR, so re-running a deploy for the same commit
+      # reuses the image that was already built and scanned.
+      - name: Build and push the image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+          if aws ecr describe-images --repository-name "$REPOSITORY" --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "$IMAGE is already in ECR, reusing it."
+          else
+            docker build -t "$IMAGE" .
+            docker push "$IMAGE"
+          fi
+
+      # ECR scans every pushed image for known CVEs. Reported, not gating:
+      # most findings sit in the Node base image and are fixed by rebuilding
+      # on a newer one, not by blocking this deploy.
+      - name: Image vulnerability scan (ECR)
+        continue-on-error: true
+        run: |
+          aws ecr wait image-scan-complete --repository-name "$REPOSITORY" --image-id imageTag="$IMAGE_TAG"
+          {
+            echo "### ECR image scan for $IMAGE_TAG"
+            echo '```json'
+            aws ecr describe-image-scan-findings --repository-name "$REPOSITORY" --image-id imageTag="$IMAGE_TAG" \
+              --query 'imageScanFindings.findingSeverityCounts' --output json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Find the last good image (the rollback target)
+        run: |
+          PREVIOUS_TAG=$(aws ssm get-parameter --name "$PARAM_PREFIX/last-good-image-tag" \
+            --query Parameter.Value --output text 2> /dev/null || true)
+          echo "PREVIOUS_TAG=$PREVIOUS_TAG" >> "$GITHUB_ENV"
+          echo "Last good image: ${PREVIOUS_TAG:-none yet}"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "<2.0.0"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=$AWS_REGION"
+
+      # wait_for_steady_state in main.tf: this returns only once the new task
+      # passes the load balancer's health check on /api/health.
+      - name: Terraform apply
+        id: apply
+        working-directory: infra/terraform
+        run: |
+          terraform apply -auto-approve \
+            -var "region=$AWS_REGION" \
+            -var "image_tag=$IMAGE_TAG" \
+            -var "with_gemini=$WITH_GEMINI"
+
+      - name: Read the service URL
+        working-directory: infra/terraform
+        run: |
+          URL=$(terraform output -raw service_url)
+          if [ -z "$URL" ]; then
+            echo "::error::Terraform returned no service URL."
+            exit 1
+          fi
+          echo "BASE_URL=$URL" >> "$GITHUB_ENV"
+          echo "### Deployed \`$IMAGE_TAG\` to $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install e2e dependencies and Chromium
+        working-directory: e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Deployment tests against the live URL
+        id: cloud_tests
+        working-directory: e2e
+        env:
+          CI: true
+          EXPECT_DATABASE: turso
+          EXPECT_GEMINI_KEY: ${{ env.WITH_GEMINI }}
+        run: npx playwright test -c playwright.cloud.config.ts
+
+      - name: Record this image as the last good one
+        run: |
+          aws ssm put-parameter --name "$PARAM_PREFIX/last-good-image-tag" --type String \
+            --value "$IMAGE_TAG" --overwrite > /dev/null
+
+      # Only when the new version deployed but failed its tests. If the apply
+      # itself failed, ECS never moved traffic to a task that didn't pass the
+      # load balancer health check.
+      - name: Roll back to the last good image
+        if: failure() && steps.cloud_tests.outcome == 'failure' && env.PREVIOUS_TAG != '' && env.PREVIOUS_TAG != env.IMAGE_TAG
+        working-directory: infra/terraform
+        run: |
+          echo "::warning::Deployment tests failed on $IMAGE_TAG. Rolling back to $PREVIOUS_TAG."
+          terraform apply -auto-approve \
+            -var "region=$AWS_REGION" \
+            -var "image_tag=$PREVIOUS_TAG" \
+            -var "with_gemini=$WITH_GEMINI"
+          echo "### Tests failed on \`$IMAGE_TAG\`; rolled back to \`$PREVIOUS_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Recent app logs
+        if: failure()
+        run: aws logs tail "/ecs/$REPOSITORY" --since 30m --format short | tail -n 200 || true
+
+      - name: Upload deployment test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-deployment-test-report
+          path: e2e/playwright-report-cloud/
+          retention-days: 14
+
+  destroy:
+    if: inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: aws
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The deploy user's access key, stored only as secrets of the "aws"
+      # environment. Keyless GitHub OIDC sign-in is blocked by this AWS
+      # account's Organizations policy (see infra/bootstrap/bootstrap.yaml).
+      - name: Sign in to AWS as the budgetbrain-github-deploy user
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "<2.0.0"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=$AWS_REGION"
+
+      # image_tag is required by the configuration but irrelevant to a destroy.
+      - name: Terraform destroy
+        working-directory: infra/terraform
+        run: |
+          terraform destroy -auto-approve \
+            -var "region=$AWS_REGION" \
+            -var "image_tag=destroy"
+
+      # The load balancer is the expensive part, and ECS removes it
+      # asynchronously. Check that it's really gone, so a "successful"
+      # destroy can't quietly leave a bill running.
+      - name: Check no load balancer is left running
+        run: |
+          for i in $(seq 1 20); do
+            LBS=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName' --output text)
+            if [ -z "$LBS" ] || [ "$LBS" = "None" ]; then
+              echo "No load balancers left in $AWS_REGION."
+              echo "### Destroyed; no load balancers left in $AWS_REGION" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Still deleting: $LBS (check $i of 20)"
+            sleep 30
+          done
+          echo "::error::Load balancer(s) still running after destroy: $LBS. Delete them in the EC2 console to stop charges."
+          exit 1

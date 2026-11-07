@@ -22,6 +22,7 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/coverage/**",
       "e2e/playwright-report/**",
+      "e2e/playwright-report-cloud/**",
       "e2e/test-results/**",
       "client/src/vite-env.d.ts",
     ],

@@ -1,0 +1,22 @@
+# Keep the build context small and free of secrets and local data.
+.git
+.github
+.claude
+.spike-pdf
+cypress-local
+infra
+**/node_modules
+**/dist
+**/coverage
+**/test-results
+**/playwright-report
+**/*.tsbuildinfo
+server/data
+server/logs
+e2e
+**/.env
+**/.env.*
+**/*.env
+.DS_Store
+*.md
+render.yaml

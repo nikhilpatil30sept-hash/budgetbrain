@@ -30,6 +30,7 @@
 | BB-P3 | A per-page repeated identity header leaks past the crop into the AI preview | FAILED → FIXED → PASS (UI + API) | ✅ UI — `e2e/tests/pdf-import.spec.ts` · ✅ API — `pdfImport.test.ts` |
 | BB-P4 | An asterisk-masked account reference inside a transaction line leaks past redaction | FAILED → FIXED → PASS (UI + API) | ✅ UI — `e2e/tests/pdf-import.spec.ts` · ✅ API — `pdfImport.test.ts` |
 | BB-P5 | A scanned/image-only PDF is rejected before any network call | PASS (UI) | ✅ UI — `e2e/tests/pdf-import.spec.ts` |
+| BB-C1 to BB-C9 | Deployment checks against a running production build (see below) | Not run by hand — see note | ✅ Deployment — `e2e/cloud/deployment.spec.ts` |
 
 *BB-3 was not included in what you gave me — left out rather than invented.*
 
@@ -322,6 +323,16 @@
 **Manual result:** PASS (UI). Confirmed via the browser's network log that zero requests were made after the upload — the rejection is entirely client-side, based on the extracted text being near-empty relative to page count.
 
 **Automated:** ✅ UI — `e2e/tests/pdf-import.spec.ts` ("rejects a scanned/image PDF before any network call"), using a synthetic `scanned-statement.pdf` fixture and asserting zero requests to `/api/extract-pdf` fire.
+
+---
+
+## BB-C1 to BB-C9 — Deployment checks
+
+Written straight as automated checks when the Docker image and the AWS environment were added, so there's no manual record. They run against a production build that is already running, never the dev server: the Docker container in CI (`docker-smoke`), and the live HTTPS URL after every AWS deploy (`.github/workflows/aws.yml`). The full table, with which checks need HTTPS, is in [infra/README.md](infra/README.md#deployment-tests-bb-c1-to-bb-c9).
+
+- **BB-C1** health check and the database it reports (`turso` on AWS) · **BB-C2** TLS certificate · **BB-C3** no plain-HTTP app · **BB-C4** security headers · **BB-C5** static app and deep links · **BB-C6** JSON API errors · **BB-C7** session cookie flags and server-side logout · **BB-C8** browser signup/login with no CSP violations · **BB-C9** spoofed `X-Forwarded-For` can't reset the login rate limit
+
+**Verified so far:** BB-C1 and BB-C4 to BB-C8 pass against the production build run locally (`NODE_ENV=production`). BB-C1 was also run with the wrong expected database and failed as it should. All nine also pass over HTTPS behind a local stand-in for the load balancer (TLS termination with a local test certificate, appending the client address to `X-Forwarded-For` the way AWS does). BB-C9 was checked both ways: with no proxy in front, three logins with three made-up addresses all reported `RateLimit-Remaining: 19`, and behind a stand-in proxy that passes the client's header through unchanged the test fails (expected 18, got 19). None of them has run against AWS yet; that happens on the first deploy.
 
 ---
 
