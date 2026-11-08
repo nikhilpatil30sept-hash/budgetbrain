@@ -61,6 +61,7 @@ Resources:
               - ecr:ListImages
               - ecr:ListTagsForResource
               - ecr:PutImage
+              - ecr:StartImageScan
               - ecr:UploadLayerPart
             Resource: !GetAtt AppRepository.Arn
           - Sid: RunTheAppOnEcs
@@ -262,6 +263,21 @@ Resources:
               }
             ]
           }
+
+  # Registry-wide scan setting. In this account the repository's own
+  # ScanOnPush flag (below) had no effect: the registry-level configuration
+  # (BASIC with no rules) decides, so the first deployed image was never
+  # scanned. This rule turns on basic scan-on-push for the app's repository.
+  # (Enhanced scanning needs Amazon Inspector, which the org policy denies.)
+  RegistryScanOnPush:
+    Type: AWS::ECR::RegistryScanningConfiguration
+    Properties:
+      ScanType: BASIC
+      Rules:
+        - ScanFrequency: SCAN_ON_PUSH
+          RepositoryFilters:
+            - Filter: budgetbrain
+              FilterType: WILDCARD
 
   MonthlyCostBudget:
     Type: AWS::Budgets::Budget
